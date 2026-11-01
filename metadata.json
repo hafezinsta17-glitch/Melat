@@ -1,0 +1,6 @@
+{
+  "name": "HUD Data Vault",
+  "description": "Tactical HUD offline database for importing CSV files, indexing citizen and account records, and instant search.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

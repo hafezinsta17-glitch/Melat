@@ -1,0 +1,256 @@
+package com.example.data
+
+object SampleDataProvider {
+
+    fun getSampleCsvString(): String {
+        val header = "NATIONAL_CODE,ACCOUNT_NUMBER,FULL_NAME,FATHER_NAME,ID_NUMBER,BIRTH_DATE,CITY_NAME,PROVINCE_NAME,BIRTH_CITY,BIRTH_PROVINCE,ADDRESS,CARD_NO,MOBILE"
+        val rows = getSampleRecords().joinToString("\n") { r ->
+            listOf(
+                r.nationalCode,
+                r.accountNumber,
+                "\"${r.fullName}\"",
+                "\"${r.fatherName}\"",
+                r.idNumber,
+                r.birthDate,
+                "\"${r.cityName}\"",
+                "\"${r.provinceName}\"",
+                "\"${r.birthCity}\"",
+                "\"${r.birthProvince}\"",
+                "\"${r.address}\"",
+                r.cardNo,
+                r.mobile
+            ).joinToString(",")
+        }
+        return "$header\n$rows"
+    }
+
+    fun getSampleRecords(): List<RecordEntity> {
+        return listOf(
+            RecordEntity(
+                nationalCode = "0012345678",
+                accountNumber = "123456789012",
+                fullName = "Sina Rostami",
+                fatherName = "Bahram",
+                idNumber = "4512",
+                birthDate = "1990/04/15",
+                cityName = "Tehran",
+                provinceName = "Tehran",
+                birthCity = "Tehran",
+                birthProvince = "Tehran",
+                address = "Valiasr Ave, Mellat Park Blvd, Bldg 42, Fl 3",
+                cardNo = "6037991823451101",
+                mobile = "09121112233"
+            ),
+            RecordEntity(
+                nationalCode = "0078901234",
+                accountNumber = "987654321098",
+                fullName = "Maryam Sadeghi",
+                fatherName = "Mohammad",
+                idNumber = "8821",
+                birthDate = "1994/08/21",
+                cityName = "Isfahan",
+                provinceName = "Isfahan",
+                birthCity = "Kashan",
+                birthProvince = "Isfahan",
+                address = "Chaharbagh Abbasi St, Alley 14, Unit 5",
+                cardNo = "5892101234567890",
+                mobile = "09132223344"
+            ),
+            RecordEntity(
+                nationalCode = "1284567890",
+                accountNumber = "456789012345",
+                fullName = "Ali Rezaei",
+                fatherName = "Hossein",
+                idNumber = "1290",
+                birthDate = "1988/11/03",
+                cityName = "Shiraz",
+                provinceName = "Fars",
+                birthCity = "Shiraz",
+                birthProvince = "Fars",
+                address = "Zand St, Eram Sq, No 88, Suite 12",
+                cardNo = "6219861045239900",
+                mobile = "09173334455"
+            ),
+            RecordEntity(
+                nationalCode = "0945678901",
+                accountNumber = "654321098765",
+                fullName = "Fatemeh Tehrani",
+                fatherName = "Reza",
+                idNumber = "3401",
+                birthDate = "1996/02/19",
+                cityName = "Mashhad",
+                provinceName = "Razavi Khorasan",
+                birthCity = "Nishapur",
+                birthProvince = "Razavi Khorasan",
+                address = "Ahmadabad Blvd, Kouhsangi Ave, Plaque 19",
+                cardNo = "5022291077651234",
+                mobile = "09154445566"
+            ),
+            RecordEntity(
+                nationalCode = "2291234567",
+                accountNumber = "321098765432",
+                fullName = "Amir Hossein Karimi",
+                fatherName = "Ghasem",
+                idNumber = "7719",
+                birthDate = "1985/07/28",
+                cityName = "Tabriz",
+                provinceName = "East Azerbaijan",
+                birthCity = "Tabriz",
+                birthProvince = "East Azerbaijan",
+                address = "Valiasr St, Razi intersection, Tower A, Apt 8",
+                cardNo = "6274121190823412",
+                mobile = "09145556677"
+            ),
+            RecordEntity(
+                nationalCode = "3398765432",
+                accountNumber = "789012345678",
+                fullName = "Narges Abbasi",
+                fatherName = "Mahmoud",
+                idNumber = "6102",
+                birthDate = "1992/10/11",
+                cityName = "Karaj",
+                provinceName = "Alborz",
+                birthCity = "Tehran",
+                birthProvince = "Tehran",
+                address = "Gohardasht, 5th West St, Block 17",
+                cardNo = "5041721099884321",
+                mobile = "09126667788"
+            ),
+            RecordEntity(
+                nationalCode = "4501239876",
+                accountNumber = "210987654321",
+                fullName = "Kaveh Radmehr",
+                fatherName = "Shahram",
+                idNumber = "2045",
+                birthDate = "1983/01/09",
+                cityName = "Ahvaz",
+                provinceName = "Khuzestan",
+                birthCity = "Abadan",
+                birthProvince = "Khuzestan",
+                address = "Kianpars, 9th East St, Bahar Bldg, Fl 2",
+                cardNo = "6104337854129087",
+                mobile = "09167778899"
+            ),
+            RecordEntity(
+                nationalCode = "5109876543",
+                accountNumber = "890123456789",
+                fullName = "Sara Mohammadi",
+                fatherName = "Jafar",
+                idNumber = "9904",
+                birthDate = "1998/06/30",
+                cityName = "Rasht",
+                provinceName = "Gilan",
+                birthCity = "Rasht",
+                birthProvince = "Gilan",
+                address = "Golsar Blvd, St 84, Lotus Apartment 4",
+                cardNo = "6393461023847612",
+                mobile = "09118889900"
+            ),
+            RecordEntity(
+                nationalCode = "0456789123",
+                accountNumber = "102938475610",
+                fullName = "Pouya Soleimani",
+                fatherName = "Davood",
+                idNumber = "1134",
+                birthDate = "1991/12/04",
+                cityName = "Kerman",
+                provinceName = "Kerman",
+                birthCity = "Sirjan",
+                birthProvince = "Kerman",
+                address = "Azadi Sq, Jomhouri Blvd, No 150",
+                cardNo = "5029081033221199",
+                mobile = "09139990011"
+            ),
+            RecordEntity(
+                nationalCode = "0876543210",
+                accountNumber = "564738291029",
+                fullName = "Zahra Mousavi",
+                fatherName = "Mostafa",
+                idNumber = "5543",
+                birthDate = "1995/03/14",
+                cityName = "Qom",
+                provinceName = "Qom",
+                birthCity = "Qom",
+                birthProvince = "Qom",
+                address = "Salariyeh Blvd, Meisam St, No 23",
+                cardNo = "6273531099887766",
+                mobile = "09120001122"
+            ),
+            RecordEntity(
+                nationalCode = "1819283746",
+                accountNumber = "998877665544",
+                fullName = "Babak Namdar",
+                fatherName = "Bijan",
+                idNumber = "3321",
+                birthDate = "1987/09/25",
+                cityName = "Yazd",
+                provinceName = "Yazd",
+                birthCity = "Yazd",
+                birthProvince = "Yazd",
+                address = "Safaeiyeh, Adalat Blvd, Golestan Alley 9",
+                cardNo = "6280231344556677",
+                mobile = "09131119988"
+            ),
+            RecordEntity(
+                nationalCode = "2593847561",
+                accountNumber = "334455667788",
+                fullName = "Shirin Kazemi",
+                fatherName = "Nasser",
+                idNumber = "7760",
+                birthDate = "1993/05/18",
+                cityName = "Hamedan",
+                provinceName = "Hamedan",
+                birthCity = "Malayer",
+                birthProvince = "Hamedan",
+                address = "Bu-Ali Sina Ave, Daneshgo Sq, Plaque 41",
+                cardNo = "6037701122334455",
+                mobile = "09182228877"
+            ),
+            RecordEntity(
+                nationalCode = "3876543219",
+                accountNumber = "778899001122",
+                fullName = "Mehran Forootan",
+                fatherName = "Mansoor",
+                idNumber = "8190",
+                birthDate = "1984/04/02",
+                cityName = "Urmia",
+                provinceName = "West Azerbaijan",
+                birthCity = "Khoy",
+                birthProvince = "West Azerbaijan",
+                address = "Daneshkadeh St, Resalat Blvd, Tower 5",
+                cardNo = "5894631877665544",
+                mobile = "09143337766"
+            ),
+            RecordEntity(
+                nationalCode = "4912345678",
+                accountNumber = "112233445566",
+                fullName = "Roya Ghasemi",
+                fatherName = "Ebrahim",
+                idNumber = "4432",
+                birthDate = "1997/11/29",
+                cityName = "Kermanshah",
+                provinceName = "Kermanshah",
+                birthCity = "Kermanshah",
+                birthProvince = "Kermanshah",
+                address = "Nobahar Ave, 104th St, Unit 3",
+                cardNo = "6221061099883344",
+                mobile = "09184446655"
+            ),
+            RecordEntity(
+                nationalCode = "6123456789",
+                accountNumber = "667788990011",
+                fullName = "Farhad Danesh",
+                fatherName = "Iraj",
+                idNumber = "9012",
+                birthDate = "1989/01/17",
+                cityName = "Bandar Abbas",
+                provinceName = "Hormozgan",
+                birthCity = "Minab",
+                birthProvince = "Hormozgan",
+                address = "Resalat Blvd, Sayyad Shirazi Ave, No 77",
+                cardNo = "6362141055443322",
+                mobile = "09175555544"
+            )
+        )
+    }
+}
