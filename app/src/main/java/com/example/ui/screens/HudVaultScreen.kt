@@ -1,5 +1,10 @@
 package com.example.ui.screens
 
+import android.app.Activity
+import android.content.Intent
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -94,6 +99,77 @@ fun HudVaultScreen(
     viewModel: HudViewModel = viewModel()
 ) {
     val context = LocalContext.current
+
+    // Register resilient ActivityResultLauncher at Screen level
+    // Handles data URI, ClipData URI, cancellation statuses, and persistable permissions
+    val filePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            val uri: Uri? = result.data?.data ?: result.data?.clipData?.let { clip ->
+                if (clip.itemCount > 0) clip.getItemAt(0).uri else null
+            }
+            if (uri != null) {
+                try {
+                    context.contentResolver.takePersistableUriPermission(
+                        uri,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    )
+                } catch (_: Exception) {}
+                viewModel.importCsv(uri)
+            } else {
+                viewModel.setImportError("No file was selected from the file picker.")
+            }
+        } else {
+            viewModel.setImportStatus("File selection cancelled or dismissed.")
+        }
+    }
+
+    val launchStoragePicker: () -> Unit = {
+        viewModel.setImportStatus("LAUNCHING UNIVERSAL STORAGE CHOOSER...")
+        try {
+            val intent = Intent(Intent.ACTION_GET_CONTENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "*/*"
+                putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("text/*", "text/csv", "application/csv", "text/comma-separated-values", "*/*"))
+            }
+            val chooser = Intent.createChooser(intent, "Select CSV Data File")
+            filePickerLauncher.launch(chooser)
+        } catch (e1: Exception) {
+            try {
+                val fallback = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                    addCategory(Intent.CATEGORY_OPENABLE)
+                    type = "*/*"
+                }
+                filePickerLauncher.launch(fallback)
+            } catch (e2: Exception) {
+                viewModel.setImportError("STORAGE PICKER UNAVAILABLE: ${e2.localizedMessage}")
+            }
+        }
+    }
+
+    val launchDocsPicker: () -> Unit = {
+        viewModel.setImportStatus("LAUNCHING SYSTEM DOCUMENTS (SAF) PICKER...")
+        try {
+            val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "*/*"
+                putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("text/*", "text/csv", "application/csv", "text/comma-separated-values", "*/*"))
+            }
+            filePickerLauncher.launch(intent)
+        } catch (e1: Exception) {
+            try {
+                val fallback = Intent(Intent.ACTION_GET_CONTENT).apply {
+                    addCategory(Intent.CATEGORY_OPENABLE)
+                    type = "*/*"
+                }
+                filePickerLauncher.launch(Intent.createChooser(fallback, "Select CSV Data File"))
+            } catch (e2: Exception) {
+                viewModel.setImportError("DOCUMENTS PICKER UNAVAILABLE: ${e2.localizedMessage}")
+            }
+        }
+    }
+
     val isSetupCompleted by viewModel.isSetupCompleted.collectAsStateWithLifecycle()
     val isBiomedicalLocked by viewModel.isBiomedicalLocked.collectAsStateWithLifecycle()
     val records by viewModel.records.collectAsStateWithLifecycle()
@@ -607,12 +683,14 @@ fun HudVaultScreen(
         )
     }
 
-    // Modal Dialogs
     HudImportDialog(
         isOpen = isImportOpen,
         progress = importProgress,
         onDismiss = { viewModel.closeImportDialog() },
-        onFileSelected = { uri -> viewModel.importCsv(uri) }
+        onPickFromStorage = launchStoragePicker,
+        onPickFromDocs = launchDocsPicker,
+        onImportText = { text -> viewModel.importCsvString(text, "MANUAL_ENTRY.csv") },
+        onLoadSampleBenchmark = { viewModel.loadSampleBenchmark() }
     )
 
     HudStatsDialog(

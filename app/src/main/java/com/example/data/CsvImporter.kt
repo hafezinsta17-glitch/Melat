@@ -255,6 +255,30 @@ class CsvImporter(private val recordDao: RecordDao) {
     }
 
     /**
+     * Imports from a raw String or Clipboard content by staging to a local cache file.
+     */
+    suspend fun importFromString(
+        context: Context,
+        content: String,
+        sourceName: String = "CLIPBOARD_DATA.csv"
+    ): Flow<ImportProgress> {
+        val bytes = content.toByteArray(StandardCharsets.UTF_8)
+        val formattedSize = when {
+            bytes.size >= 1024 * 1024 -> String.format("%.2f MB", bytes.size / (1024f * 1024f))
+            bytes.size >= 1024 -> String.format("%.1f KB", bytes.size / 1024f)
+            else -> "${bytes.size} bytes"
+        }
+
+        val cacheFile = withContext(Dispatchers.IO) {
+            val tempFile = File(context.cacheDir, "vault_text_staging_${System.currentTimeMillis()}.csv")
+            tempFile.writeBytes(bytes)
+            tempFile
+        }
+
+        return importFile(cacheFile, sourceName, formattedSize)
+    }
+
+    /**
      * Imports records from a local File into Room database with batching, progress reporting, and auto-cleanup.
      */
     fun importFile(

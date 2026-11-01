@@ -47,6 +47,10 @@ class RecordRepository(
         return csvImporter.importFromUri(context, uri)
     }
 
+    suspend fun importCsvString(context: Context, content: String, name: String = "TEXT_IMPORT.csv"): Flow<ImportProgress> {
+        return csvImporter.importFromString(context, content, name)
+    }
+
     suspend fun loadSampleRecords(): Int {
         val samples = SampleDataProvider.getSampleRecords()
         recordDao.insertBatch(samples)

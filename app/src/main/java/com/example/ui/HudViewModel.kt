@@ -147,6 +147,24 @@ class HudViewModel(application: Application) : AndroidViewModel(application) {
         _flashMessage.value = message
     }
 
+    fun setImportStatus(status: String) {
+        _importProgress.value = _importProgress.value.copy(
+            isRunning = false,
+            statusMessage = status,
+            error = null
+        )
+    }
+
+    fun setImportError(error: String) {
+        _importProgress.value = _importProgress.value.copy(
+            isRunning = false,
+            isFinished = true,
+            error = error,
+            statusMessage = "SELECTION FAILED"
+        )
+        showFlash("ERROR: $error")
+    }
+
     fun importCsv(uri: Uri) {
         viewModelScope.launch {
             try {
@@ -156,7 +174,7 @@ class HudViewModel(application: Application) : AndroidViewModel(application) {
                 )
                 repository.importCsvUri(getApplication(), uri).collect { progress ->
                     _importProgress.value = progress
-                    if (progress.isFinished) {
+                    if (progress.isFinished && progress.error == null) {
                         showFlash("IMPORT COMPLETE: ${progress.recordsImported} RECORDS INDEXED")
                     }
                 }
@@ -168,6 +186,58 @@ class HudViewModel(application: Application) : AndroidViewModel(application) {
                     statusMessage = "CRITICAL: IMPORT ABORTED"
                 )
                 showFlash("IMPORT FAILED: ${e.message}")
+            }
+        }
+    }
+
+    fun importCsvString(content: String, sourceName: String = "CLIPBOARD_DATA.csv") {
+        viewModelScope.launch {
+            try {
+                _importProgress.value = ImportProgress(
+                    isRunning = true,
+                    statusMessage = "PARSING CSV STREAM...",
+                    fileName = sourceName
+                )
+                repository.importCsvString(getApplication(), content, sourceName).collect { progress ->
+                    _importProgress.value = progress
+                    if (progress.isFinished && progress.error == null) {
+                        showFlash("IMPORT COMPLETE: ${progress.recordsImported} RECORDS INDEXED")
+                    }
+                }
+            } catch (e: Exception) {
+                _importProgress.value = ImportProgress(
+                    isRunning = false,
+                    isFinished = true,
+                    error = e.localizedMessage ?: "Failed to parse CSV",
+                    statusMessage = "CRITICAL: IMPORT ABORTED"
+                )
+                showFlash("IMPORT FAILED: ${e.message}")
+            }
+        }
+    }
+
+    fun loadSampleBenchmark() {
+        viewModelScope.launch {
+            try {
+                _importProgress.value = ImportProgress(
+                    isRunning = true,
+                    statusMessage = "LOADING BENCHMARK REPOSITORY (100 CITIZENS)...",
+                    fileName = "MELAT_BENCHMARK_100.csv"
+                )
+                val sampleCsv = com.example.data.SampleDataProvider.getSampleCsvString()
+                repository.importCsvString(getApplication(), sampleCsv, "MELAT_BENCHMARK_100.csv").collect { progress ->
+                    _importProgress.value = progress
+                    if (progress.isFinished && progress.error == null) {
+                        showFlash("BENCHMARK LOADED: ${progress.recordsImported} CITIZENS ACTIVE")
+                    }
+                }
+            } catch (e: Exception) {
+                _importProgress.value = ImportProgress(
+                    isRunning = false,
+                    isFinished = true,
+                    error = e.localizedMessage ?: "Benchmark load failed",
+                    statusMessage = "LOAD FAILED"
+                )
             }
         }
     }

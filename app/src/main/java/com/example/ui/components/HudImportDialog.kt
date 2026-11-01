@@ -1,15 +1,9 @@
 package com.example.ui.components
 
-import android.app.Activity
-import android.content.Context
-import android.content.Intent
-import android.net.Uri
-import android.widget.Toast
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -23,14 +17,19 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ContentPaste
+import androidx.compose.material.icons.filled.Dataset
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.FileOpen
 import androidx.compose.material.icons.filled.FileUpload
 import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -45,7 +44,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -72,38 +72,17 @@ fun HudImportDialog(
     isOpen: Boolean,
     progress: ImportProgress,
     onDismiss: () -> Unit,
-    onFileSelected: (Uri) -> Unit
+    onPickFromStorage: () -> Unit,
+    onPickFromDocs: () -> Unit,
+    onImportText: (String) -> Unit,
+    onLoadSampleBenchmark: () -> Unit
 ) {
     if (!isOpen) return
 
-    val context = LocalContext.current
-    var lastSelectedName by remember { mutableStateOf<String?>(null) }
-
-    // UNIVERSAL FILE PICKER: Uses ACTION_GET_CONTENT with Intent.createChooser
-    // Works across ALL phone file managers (Samsung My Files, Xiaomi File Manager, Downloads, Drive, etc.)
-    val universalPicker = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-        if (result.resultCode == Activity.RESULT_OK) {
-            val uri = result.data?.data
-            if (uri != null) {
-                lastSelectedName = uri.lastPathSegment ?: "storage_file.csv"
-                onFileSelected(uri)
-            } else {
-                Toast.makeText(context, "No file selected", Toast.LENGTH_SHORT).show()
-            }
-        }
-    }
-
-    // ALTERNATIVE SYSTEM STORAGE PICKER: Uses ACTION_OPEN_DOCUMENT with wildcard
-    val systemDocPicker = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocument()
-    ) { uri: Uri? ->
-        if (uri != null) {
-            lastSelectedName = uri.lastPathSegment ?: "document_file.csv"
-            onFileSelected(uri)
-        }
-    }
+    val clipboardManager = LocalClipboardManager.current
+    var showManualInput by remember { mutableStateOf(false) }
+    var manualCsvText by remember { mutableStateOf("") }
+    var inlineError by remember { mutableStateOf<String?>(null) }
 
     Dialog(
         onDismissRequest = {
@@ -114,7 +93,7 @@ fun HudImportDialog(
         Surface(
             modifier = Modifier
                 .fillMaxWidth(0.95f)
-                .fillMaxHeight(0.88f)
+                .fillMaxHeight(0.92f)
                 .testTag("import_dialog"),
             color = HudBackground,
             shape = RoundedCornerShape(4.dp),
@@ -188,19 +167,17 @@ fun HudImportDialog(
                             .verticalScroll(rememberScrollState()),
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        // Live Progress / Ingestion Banner
-                        if (progress.isRunning || progress.recordsImported > 0 || progress.error != null) {
+                        // Live Progress / Status / Error Banner (always visible when there is telemetry or status)
+                        if (progress.isRunning || progress.recordsImported > 0 || progress.error != null || progress.statusMessage.isNotEmpty() || inlineError != null) {
+                            val isError = progress.error != null || inlineError != null
+                            val isSuccess = progress.isFinished && !isError
+                            val bannerColor = if (isError) HudAlert else if (isSuccess) HudSecondary else HudAmber
+
                             Box(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .background(HudSurfaceElevated, RoundedCornerShape(2.dp))
-                                    .border(
-                                        1.dp,
-                                        if (progress.error != null) HudAlert
-                                        else if (progress.isFinished) HudSecondary
-                                        else HudAmber,
-                                        RoundedCornerShape(2.dp)
-                                    )
+                                    .border(1.dp, bannerColor, RoundedCornerShape(2.dp))
                                     .padding(12.dp)
                             ) {
                                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -211,26 +188,22 @@ fun HudImportDialog(
                                     ) {
                                         Row(verticalAlignment = Alignment.CenterVertically) {
                                             Icon(
-                                                imageVector = if (progress.error != null) Icons.Default.ErrorOutline
-                                                else if (progress.isFinished) Icons.Default.CheckCircle
+                                                imageVector = if (isError) Icons.Default.ErrorOutline
+                                                else if (isSuccess) Icons.Default.CheckCircle
                                                 else Icons.Default.FileUpload,
                                                 contentDescription = null,
-                                                tint = if (progress.error != null) HudAlert
-                                                else if (progress.isFinished) HudSecondary
-                                                else HudAmber,
+                                                tint = bannerColor,
                                                 modifier = Modifier.size(16.dp)
                                             )
                                             Spacer(modifier = Modifier.width(6.dp))
                                             Text(
-                                                text = if (progress.error != null) "INGESTION ERROR"
-                                                else if (progress.isFinished) "IMPORT SUCCESSFUL"
-                                                else "STREAMING INGESTION ACTIVE",
+                                                text = if (isError) "INGESTION NOTICE"
+                                                else if (isSuccess) "IMPORT SUCCESSFUL"
+                                                else "TELEMETRY STATUS",
                                                 fontFamily = OrbitronFontFamily,
                                                 fontSize = 11.sp,
                                                 fontWeight = FontWeight.Bold,
-                                                color = if (progress.error != null) HudAlert
-                                                else if (progress.isFinished) HudSecondary
-                                                else HudAmber
+                                                color = bannerColor
                                             )
                                         }
 
@@ -245,7 +218,7 @@ fun HudImportDialog(
 
                                     if (progress.fileName.isNotEmpty()) {
                                         Text(
-                                            text = "SOURCE: ${progress.fileName} (${progress.fileSizeFormatted})",
+                                            text = "SOURCE: ${progress.fileName} ${if (progress.fileSizeFormatted.isNotEmpty()) "(${progress.fileSizeFormatted})" else ""}",
                                             fontFamily = ShareTechMonoFontFamily,
                                             fontSize = 11.sp,
                                             color = HudTextSecondary
@@ -261,18 +234,29 @@ fun HudImportDialog(
                                         )
                                     }
 
+                                    if (progress.recordsImported > 0) {
+                                        Text(
+                                            text = "INDEXED: ${progress.recordsImported} RECORDS",
+                                            fontFamily = ShareTechMonoFontFamily,
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = HudSecondary
+                                        )
+                                    }
+
                                     if (progress.recordsPerSecond > 0) {
                                         Text(
-                                            text = "TELEMETRY SPEED: ${progress.recordsPerSecond} RECS/SEC",
+                                            text = "INGESTION SPEED: ${progress.recordsPerSecond} RECS/SEC",
                                             fontFamily = ShareTechMonoFontFamily,
                                             fontSize = 11.sp,
                                             color = HudAmber
                                         )
                                     }
 
-                                    if (progress.error != null) {
+                                    val activeError = inlineError ?: progress.error
+                                    if (activeError != null) {
                                         Text(
-                                            text = "CAUSE: ${progress.error}",
+                                            text = "DETAIL: $activeError",
                                             fontFamily = ShareTechMonoFontFamily,
                                             fontSize = 11.sp,
                                             color = HudAlert
@@ -343,6 +327,124 @@ fun HudImportDialog(
                             fontSize = 10.sp,
                             color = HudTextSecondary
                         )
+
+                        // Collapsible Direct Paste / Manual Ingestion Section
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { showManualInput = !showManualInput }
+                                .padding(vertical = 4.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    imageVector = Icons.Default.ContentPaste,
+                                    contentDescription = null,
+                                    tint = HudAmber,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "DIRECT TEXT / CLIPBOARD INGESTION",
+                                    fontFamily = OrbitronFontFamily,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = HudAmber
+                                )
+                            }
+                            Icon(
+                                imageVector = if (showManualInput) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                                contentDescription = null,
+                                tint = HudAmber,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+
+                        AnimatedVisibility(visible = showManualInput) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(Color(0xFF040B13), RoundedCornerShape(2.dp))
+                                    .border(1.dp, HudBorder)
+                                    .padding(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Text(
+                                    text = "Paste or type CSV lines directly (ideal if device file chooser is blocked):",
+                                    fontFamily = ShareTechMonoFontFamily,
+                                    fontSize = 10.sp,
+                                    color = HudTextSecondary
+                                )
+
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(100.dp)
+                                        .background(HudBackground)
+                                        .border(1.dp, HudBorder)
+                                        .padding(8.dp)
+                                ) {
+                                    if (manualCsvText.isEmpty()) {
+                                        Text(
+                                            text = "Paste CSV rows here...\nExample:\n0012345678,123456789,Ali Rezaei,Hassan,...",
+                                            fontFamily = ShareTechMonoFontFamily,
+                                            fontSize = 11.sp,
+                                            color = HudTextMuted
+                                        )
+                                    }
+                                    BasicTextField(
+                                        value = manualCsvText,
+                                        onValueChange = {
+                                            manualCsvText = it
+                                            inlineError = null
+                                        },
+                                        modifier = Modifier.fillMaxWidth(),
+                                        textStyle = androidx.compose.ui.text.TextStyle(
+                                            color = HudTextPrimary,
+                                            fontFamily = ShareTechMonoFontFamily,
+                                            fontSize = 11.sp
+                                        ),
+                                        cursorBrush = SolidColor(HudSecondary)
+                                    )
+                                }
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    HudButton(
+                                        onClick = {
+                                            val clip = clipboardManager.getText()?.text
+                                            if (!clip.isNullOrBlank()) {
+                                                manualCsvText = clip
+                                                inlineError = null
+                                            } else {
+                                                inlineError = "CLIPBOARD EMPTY: Copy CSV rows to clipboard first."
+                                            }
+                                        },
+                                        text = "PASTE CLIPBOARD",
+                                        accentColor = HudAmber,
+                                        modifier = Modifier.weight(1f)
+                                    )
+
+                                    HudButton(
+                                        onClick = {
+                                            if (manualCsvText.isNotBlank()) {
+                                                onImportText(manualCsvText)
+                                                manualCsvText = ""
+                                            } else {
+                                                inlineError = "INPUT EMPTY: Enter or paste CSV text before importing."
+                                            }
+                                        },
+                                        text = "INGEST TEXT",
+                                        accentColor = HudSecondary,
+                                        enabled = manualCsvText.isNotBlank() && !progress.isRunning,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                }
+                            }
+                        }
                     }
 
                     HorizontalDivider(
@@ -351,22 +453,13 @@ fun HudImportDialog(
                         color = HudBorder
                     )
 
-                    // Actions Row - Dual pickers to ensure 100% compatibility on any phone
+                    // Actions Column - Universal Chooser, Documents SAF, Direct Clipboard, and Benchmark
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         // Primary: Universal Storage Chooser (Opens phone storage, Downloads, My Files)
                         HudButton(
                             onClick = {
-                                try {
-                                    val intent = Intent(Intent.ACTION_GET_CONTENT).apply {
-                                        type = "*/*"
-                                        addCategory(Intent.CATEGORY_OPENABLE)
-                                        putExtra(Intent.EXTRA_LOCAL_ONLY, false)
-                                    }
-                                    universalPicker.launch(Intent.createChooser(intent, "Choose CSV File from Phone Storage"))
-                                } catch (e: Exception) {
-                                    // Fallback to direct document picker
-                                    systemDocPicker.launch(arrayOf("*/*"))
-                                }
+                                inlineError = null
+                                onPickFromStorage()
                             },
                             text = "SELECT CSV FROM PHONE STORAGE",
                             accentColor = HudSecondary,
@@ -384,10 +477,11 @@ fun HudImportDialog(
                             }
                         )
 
-                        // Secondary: Alternative System Documents Picker
+                        // Secondary: System Documents (SAF) Alternative Picker
                         HudButton(
                             onClick = {
-                                systemDocPicker.launch(arrayOf("*/*"))
+                                inlineError = null
+                                onPickFromDocs()
                             },
                             text = "ALTERNATIVE DOCUMENTS PICKER",
                             accentColor = HudPrimary,
@@ -400,6 +494,28 @@ fun HudImportDialog(
                                     imageVector = Icons.Default.FileOpen,
                                     contentDescription = null,
                                     tint = HudPrimary,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                        )
+
+                        // Quick Benchmark Loader
+                        HudButton(
+                            onClick = {
+                                inlineError = null
+                                onLoadSampleBenchmark()
+                            },
+                            text = "LOAD SAMPLE BENCHMARK (100 CITIZENS)",
+                            accentColor = HudAmber,
+                            enabled = !progress.isRunning,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("load_benchmark_button"),
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = Icons.Default.Dataset,
+                                    contentDescription = null,
+                                    tint = HudAmber,
                                     modifier = Modifier.size(16.dp)
                                 )
                             }
