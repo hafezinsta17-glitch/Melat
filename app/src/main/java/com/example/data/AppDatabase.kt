@@ -26,6 +26,7 @@ abstract class AppDatabase : RoomDatabase() {
                     "hud_records_vault.db"
                 )
                     .fallbackToDestructiveMigration()
+                    .setJournalMode(RoomDatabase.JournalMode.WRITE_AHEAD_LOGGING)
                     .build()
                 INSTANCE = instance
                 instance

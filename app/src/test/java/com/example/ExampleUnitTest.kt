@@ -15,6 +15,12 @@ class ExampleUnitTest {
         override fun getRecordCount() = kotlinx.coroutines.flow.flowOf(0)
         override suspend fun getRecordCountSync() = 0
         override fun searchAllFields(query: String, limit: Int) = kotlinx.coroutines.flow.flowOf(emptyList<RecordEntity>())
+        override fun searchByNationalCodePrefix(prefixQuery: String, limit: Int) = kotlinx.coroutines.flow.flowOf(emptyList<RecordEntity>())
+        override fun searchByMobilePrefix(prefixQuery: String, limit: Int) = kotlinx.coroutines.flow.flowOf(emptyList<RecordEntity>())
+        override fun searchByCardNoPrefix(prefixQuery: String, limit: Int) = kotlinx.coroutines.flow.flowOf(emptyList<RecordEntity>())
+        override fun searchByAccountPrefix(prefixQuery: String, limit: Int) = kotlinx.coroutines.flow.flowOf(emptyList<RecordEntity>())
+        override fun searchByNamePrefix(prefixQuery: String, limit: Int) = kotlinx.coroutines.flow.flowOf(emptyList<RecordEntity>())
+        override fun searchByCityPrefix(prefixQuery: String, limit: Int) = kotlinx.coroutines.flow.flowOf(emptyList<RecordEntity>())
         override fun searchByNationalCode(query: String, limit: Int) = kotlinx.coroutines.flow.flowOf(emptyList<RecordEntity>())
         override fun searchByMobile(query: String, limit: Int) = kotlinx.coroutines.flow.flowOf(emptyList<RecordEntity>())
         override fun searchByCardNo(query: String, limit: Int) = kotlinx.coroutines.flow.flowOf(emptyList<RecordEntity>())

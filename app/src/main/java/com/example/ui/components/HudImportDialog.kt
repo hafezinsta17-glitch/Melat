@@ -1,6 +1,7 @@
 package com.example.ui.components
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -43,6 +44,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalClipboardManager
@@ -167,11 +169,23 @@ fun HudImportDialog(
                             .verticalScroll(rememberScrollState()),
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        // Live Progress / Status / Error Banner (always visible when there is telemetry or status)
+                        // Live Process Bar, Record Counter & Telemetry Banner
                         if (progress.isRunning || progress.recordsImported > 0 || progress.error != null || progress.statusMessage.isNotEmpty() || inlineError != null) {
                             val isError = progress.error != null || inlineError != null
                             val isSuccess = progress.isFinished && !isError
                             val bannerColor = if (isError) HudAlert else if (isSuccess) HudSecondary else HudAmber
+
+                            val targetFraction = (progress.percent / 100f).coerceIn(0f, 1f)
+                            val animatedProgress by animateFloatAsState(
+                                targetValue = if (progress.isRunning && targetFraction < 0.02f) 0.02f else targetFraction,
+                                label = "import_progress_anim"
+                            )
+
+                            fun formatTime(sec: Int): String {
+                                val m = sec / 60
+                                val s = sec % 60
+                                return String.format("%02d:%02d", m, s)
+                            }
 
                             Box(
                                 modifier = Modifier
@@ -180,7 +194,8 @@ fun HudImportDialog(
                                     .border(1.dp, bannerColor, RoundedCornerShape(2.dp))
                                     .padding(12.dp)
                             ) {
-                                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    // Process Header
                                     Row(
                                         modifier = Modifier.fillMaxWidth(),
                                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -198,8 +213,8 @@ fun HudImportDialog(
                                             Spacer(modifier = Modifier.width(6.dp))
                                             Text(
                                                 text = if (isError) "INGESTION NOTICE"
-                                                else if (isSuccess) "IMPORT SUCCESSFUL"
-                                                else "TELEMETRY STATUS",
+                                                else if (isSuccess) "DATABASE INGESTION COMPLETED"
+                                                else "DATABASE INGESTION PROCESS",
                                                 fontFamily = OrbitronFontFamily,
                                                 fontSize = 11.sp,
                                                 fontWeight = FontWeight.Bold,
@@ -207,12 +222,116 @@ fun HudImportDialog(
                                             )
                                         }
 
-                                        if (progress.isRunning) {
-                                            CircularProgressIndicator(
-                                                modifier = Modifier.size(16.dp),
-                                                strokeWidth = 2.dp,
-                                                color = HudSecondary
+                                        // Large Percentage readout
+                                        Text(
+                                            text = String.format("[ %.1f%% ]", progress.percent),
+                                            fontFamily = OrbitronFontFamily,
+                                            fontSize = 13.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = if (isSuccess) HudSecondary else HudAmber
+                                        )
+                                    }
+
+                                    // Dynamic Tactical HUD Process Bar
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(22.dp)
+                                            .background(Color(0xFF040E18), RoundedCornerShape(2.dp))
+                                            .border(1.dp, HudBorder, RoundedCornerShape(2.dp))
+                                            .padding(2.dp)
+                                    ) {
+                                        // Filled track with neon gradient
+                                        if (animatedProgress > 0f) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .fillMaxHeight()
+                                                    .fillMaxWidth(animatedProgress)
+                                                    .background(
+                                                        brush = Brush.horizontalGradient(
+                                                            colors = if (isSuccess) {
+                                                                listOf(HudSecondary.copy(alpha = 0.8f), HudSecondary)
+                                                            } else {
+                                                                listOf(HudPrimary, HudSecondary)
+                                                            }
+                                                        ),
+                                                        shape = RoundedCornerShape(1.dp)
+                                                    )
                                             )
+                                        }
+
+                                        // Centered text inside the process bar
+                                        Text(
+                                            text = if (progress.totalRecords > 0) {
+                                                "${String.format("%,d", progress.recordsImported)} / ${String.format("%,d", progress.totalRecords)} RECORDS"
+                                            } else if (progress.recordsImported > 0) {
+                                                "${String.format("%,d", progress.recordsImported)} RECORDS INDEXED"
+                                            } else {
+                                                "CALCULATING RECORD VOLUME..."
+                                            },
+                                            fontFamily = ShareTechMonoFontFamily,
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = HudTextPrimary,
+                                            modifier = Modifier.align(Alignment.Center)
+                                        )
+                                    }
+
+                                    // Record Count & Rate row
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = "COUNTED: ${String.format("%,d", progress.recordsImported)} / ${if (progress.totalRecords > 0) String.format("%,d", progress.totalRecords) else "---"} ${if (progress.isTotalEstimated) "(ESTIMATED)" else "(EXACT)"}",
+                                            fontFamily = ShareTechMonoFontFamily,
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = if (isSuccess) HudSecondary else HudTextPrimary
+                                        )
+
+                                        if (progress.recordsPerSecond > 0) {
+                                            Text(
+                                                text = "${String.format("%,d", progress.recordsPerSecond)} RECS/SEC",
+                                                fontFamily = ShareTechMonoFontFamily,
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = HudAmber
+                                            )
+                                        }
+                                    }
+
+                                    // Telemetry Grid: Elapsed Time, ETA, and Batch
+                                    if (progress.isRunning || progress.isFinished) {
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .background(Color(0xFF02070D), RoundedCornerShape(2.dp))
+                                                .border(0.5.dp, HudBorder)
+                                                .padding(horizontal = 8.dp, vertical = 5.dp),
+                                            horizontalArrangement = Arrangement.SpaceBetween
+                                        ) {
+                                            Text(
+                                                text = "ELAPSED: ${formatTime(progress.elapsedSeconds.toInt())}",
+                                                fontFamily = ShareTechMonoFontFamily,
+                                                fontSize = 10.sp,
+                                                color = HudTextSecondary
+                                            )
+                                            Text(
+                                                text = if (isSuccess) "STATUS: COMPLETE" else if (progress.etaSeconds > 0) "ETA: ${formatTime(progress.etaSeconds)}" else "ETA: CALCULATING...",
+                                                fontFamily = ShareTechMonoFontFamily,
+                                                fontSize = 10.sp,
+                                                color = if (isSuccess) HudSecondary else HudAmber
+                                            )
+                                            if (progress.currentBatch > 0) {
+                                                Text(
+                                                    text = "BATCH #${progress.currentBatch}",
+                                                    fontFamily = ShareTechMonoFontFamily,
+                                                    fontSize = 10.sp,
+                                                    color = HudPrimary
+                                                )
+                                            }
                                         }
                                     }
 
@@ -220,7 +339,7 @@ fun HudImportDialog(
                                         Text(
                                             text = "SOURCE: ${progress.fileName} ${if (progress.fileSizeFormatted.isNotEmpty()) "(${progress.fileSizeFormatted})" else ""}",
                                             fontFamily = ShareTechMonoFontFamily,
-                                            fontSize = 11.sp,
+                                            fontSize = 10.sp,
                                             color = HudTextSecondary
                                         )
                                     }
@@ -229,27 +348,8 @@ fun HudImportDialog(
                                         Text(
                                             text = "> ${progress.statusMessage}",
                                             fontFamily = ShareTechMonoFontFamily,
-                                            fontSize = 12.sp,
-                                            color = HudTextPrimary
-                                        )
-                                    }
-
-                                    if (progress.recordsImported > 0) {
-                                        Text(
-                                            text = "INDEXED: ${progress.recordsImported} RECORDS",
-                                            fontFamily = ShareTechMonoFontFamily,
-                                            fontSize = 12.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = HudSecondary
-                                        )
-                                    }
-
-                                    if (progress.recordsPerSecond > 0) {
-                                        Text(
-                                            text = "INGESTION SPEED: ${progress.recordsPerSecond} RECS/SEC",
-                                            fontFamily = ShareTechMonoFontFamily,
                                             fontSize = 11.sp,
-                                            color = HudAmber
+                                            color = HudTextPrimary
                                         )
                                     }
 

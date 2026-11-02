@@ -26,18 +26,36 @@ class RecordRepository(
     fun getRecordCount(): Flow<Int> = recordDao.getRecordCount()
 
     fun searchRecords(query: String, filter: SearchFilter): Flow<List<RecordEntity>> {
-        val cleanQuery = query.trim()
+        val cleanQuery = csvImporter.normalizeDigits(query.trim())
         if (cleanQuery.isEmpty()) {
             return recordDao.getAllRecords(limit = 100)
         }
+        val prefix = "$cleanQuery%"
         return when (filter) {
-            SearchFilter.ALL -> recordDao.searchAllFields(cleanQuery)
-            SearchFilter.CARD_NO -> recordDao.searchByCardNo(cleanQuery)
-            SearchFilter.ACCOUNT -> recordDao.searchByAccount(cleanQuery)
-            SearchFilter.NATIONAL_CODE -> recordDao.searchByNationalCode(cleanQuery)
-            SearchFilter.MOBILE -> recordDao.searchByMobile(cleanQuery)
-            SearchFilter.NAME -> recordDao.searchByName(cleanQuery)
-            SearchFilter.CITY -> recordDao.searchByCity(cleanQuery)
+            SearchFilter.ALL -> {
+                // If numeric query, route to indexed prefix queries based on Iranian format length
+                val digitsOnly = cleanQuery.filter { it.isDigit() }
+                if (digitsOnly.length >= 4) {
+                    when {
+                        digitsOnly.length in 13..16 || digitsOnly.startsWith("6") || digitsOnly.startsWith("5") ->
+                            recordDao.searchByCardNoPrefix(prefix)
+                        digitsOnly.length in 8..10 ->
+                            recordDao.searchByNationalCodePrefix(prefix)
+                        digitsOnly.startsWith("09") || digitsOnly.length == 11 ->
+                            recordDao.searchByMobilePrefix(prefix)
+                        else ->
+                            recordDao.searchByAccountPrefix(prefix)
+                    }
+                } else {
+                    recordDao.searchAllFields(cleanQuery)
+                }
+            }
+            SearchFilter.CARD_NO -> recordDao.searchByCardNoPrefix(prefix)
+            SearchFilter.ACCOUNT -> recordDao.searchByAccountPrefix(prefix)
+            SearchFilter.NATIONAL_CODE -> recordDao.searchByNationalCodePrefix(prefix)
+            SearchFilter.MOBILE -> recordDao.searchByMobilePrefix(prefix)
+            SearchFilter.NAME -> recordDao.searchByNamePrefix(prefix)
+            SearchFilter.CITY -> recordDao.searchByCityPrefix(prefix)
         }
     }
 

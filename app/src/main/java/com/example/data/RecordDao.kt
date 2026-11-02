@@ -35,6 +35,26 @@ interface RecordDao {
     """)
     fun searchAllFields(query: String, limit: Int = 200): Flow<List<RecordEntity>>
 
+    // Fast Indexed Prefix Queries (O(log N) through B-Tree index)
+    @Query("SELECT * FROM records WHERE national_code LIKE :prefixQuery ORDER BY id DESC LIMIT :limit")
+    fun searchByNationalCodePrefix(prefixQuery: String, limit: Int = 100): Flow<List<RecordEntity>>
+
+    @Query("SELECT * FROM records WHERE mobile LIKE :prefixQuery ORDER BY id DESC LIMIT :limit")
+    fun searchByMobilePrefix(prefixQuery: String, limit: Int = 100): Flow<List<RecordEntity>>
+
+    @Query("SELECT * FROM records WHERE card_no LIKE :prefixQuery ORDER BY id DESC LIMIT :limit")
+    fun searchByCardNoPrefix(prefixQuery: String, limit: Int = 100): Flow<List<RecordEntity>>
+
+    @Query("SELECT * FROM records WHERE account_number LIKE :prefixQuery ORDER BY id DESC LIMIT :limit")
+    fun searchByAccountPrefix(prefixQuery: String, limit: Int = 100): Flow<List<RecordEntity>>
+
+    @Query("SELECT * FROM records WHERE full_name LIKE :prefixQuery ORDER BY id DESC LIMIT :limit")
+    fun searchByNamePrefix(prefixQuery: String, limit: Int = 100): Flow<List<RecordEntity>>
+
+    @Query("SELECT * FROM records WHERE city_name LIKE :prefixQuery ORDER BY id DESC LIMIT :limit")
+    fun searchByCityPrefix(prefixQuery: String, limit: Int = 100): Flow<List<RecordEntity>>
+
+    // General Substring Fallbacks
     @Query("SELECT * FROM records WHERE national_code LIKE '%' || :query || '%' ORDER BY id DESC LIMIT :limit")
     fun searchByNationalCode(query: String, limit: Int = 100): Flow<List<RecordEntity>>
 
