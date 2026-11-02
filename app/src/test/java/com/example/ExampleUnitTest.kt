@@ -12,8 +12,21 @@ class ExampleUnitTest {
 
     private val fakeDao = object : com.example.data.RecordDao {
         override fun getAllRecords(limit: Int) = kotlinx.coroutines.flow.flowOf(emptyList<RecordEntity>())
+        override suspend fun getAllRecordsFast(limit: Int) = emptyList<RecordEntity>()
         override fun getRecordCount() = kotlinx.coroutines.flow.flowOf(0)
         override suspend fun getRecordCountSync() = 0
+        override suspend fun searchExactCard(query: String, limit: Int) = emptyList<RecordEntity>()
+        override suspend fun searchExactNationalCode(query: String, limit: Int) = emptyList<RecordEntity>()
+        override suspend fun searchExactMobile(query: String, limit: Int) = emptyList<RecordEntity>()
+        override suspend fun searchExactAccount(query: String, limit: Int) = emptyList<RecordEntity>()
+        override suspend fun searchExactIdNumber(query: String, limit: Int) = emptyList<RecordEntity>()
+        override suspend fun searchCardPrefixRange(low: String, high: String, limit: Int) = emptyList<RecordEntity>()
+        override suspend fun searchNationalCodePrefixRange(low: String, high: String, limit: Int) = emptyList<RecordEntity>()
+        override suspend fun searchMobilePrefixRange(low: String, high: String, limit: Int) = emptyList<RecordEntity>()
+        override suspend fun searchAccountPrefixRange(low: String, high: String, limit: Int) = emptyList<RecordEntity>()
+        override suspend fun searchNamePrefixRange(low: String, high: String, limit: Int) = emptyList<RecordEntity>()
+        override suspend fun searchCityPrefixRange(low: String, high: String, limit: Int) = emptyList<RecordEntity>()
+
         override fun searchAllFields(query: String, limit: Int) = kotlinx.coroutines.flow.flowOf(emptyList<RecordEntity>())
         override fun searchByNationalCodePrefix(prefixQuery: String, limit: Int) = kotlinx.coroutines.flow.flowOf(emptyList<RecordEntity>())
         override fun searchByMobilePrefix(prefixQuery: String, limit: Int) = kotlinx.coroutines.flow.flowOf(emptyList<RecordEntity>())
@@ -88,5 +101,49 @@ class ExampleUnitTest {
             assertTrue(record.mobile.isNotEmpty())
             assertTrue(record.cityName.isNotEmpty())
         }
+    }
+
+    @Test
+    fun testImportControllerPauseAndResume() = kotlinx.coroutines.runBlocking {
+        val controller = com.example.data.ImportController()
+        org.junit.Assert.assertFalse(controller.isPaused)
+        org.junit.Assert.assertFalse(controller.isCancelled)
+
+        controller.pause()
+        assertTrue(controller.isPaused)
+
+        // Resuming unblocks
+        controller.resume()
+        org.junit.Assert.assertFalse(controller.isPaused)
+    }
+
+    @Test
+    fun testImportControllerCancel() = kotlinx.coroutines.runBlocking {
+        val controller = com.example.data.ImportController()
+        controller.pause()
+        assertTrue(controller.isPaused)
+
+        controller.cancel()
+        assertTrue(controller.isCancelled)
+        org.junit.Assert.assertFalse(controller.isPaused)
+    }
+
+    @Test
+    fun testImportProgressDefaultAndPausedStates() {
+        val progress = com.example.data.ImportProgress(
+            isRunning = false,
+            isPaused = true,
+            canResume = true,
+            recordsImported = 5000,
+            totalRecords = 100000,
+            currentBatch = 2,
+            percent = 5.0f,
+            statusMessage = "PAUSED AT BATCH 2"
+        )
+        assertTrue(progress.isPaused)
+        assertTrue(progress.canResume)
+        org.junit.Assert.assertFalse(progress.isRunning)
+        assertEquals(5000, progress.recordsImported)
+        assertEquals(100000, progress.totalRecords)
     }
 }

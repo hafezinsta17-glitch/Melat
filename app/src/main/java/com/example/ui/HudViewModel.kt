@@ -10,27 +10,40 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.AppDatabase
 import com.example.data.CsvImporter
+import com.example.data.ImportController
 import com.example.data.ImportProgress
 import com.example.data.RecordEntity
 import com.example.data.RecordRepository
 import com.example.data.SearchFilter
 import com.example.security.SecurityPreferences
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.debounce
-import kotlinx.coroutines.flow.flatMapLatest
-import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-@OptIn(ExperimentalCoroutinesApi::class, FlowPreview::class)
+/**
+ * Detailed Search Processing State for real-time HUD visual telemetry.
+ */
+data class SearchProcessingState(
+    val isSearching: Boolean = false,
+    val query: String = "",
+    val filter: SearchFilter = SearchFilter.ALL,
+    val phase: String = "IDLE",
+    val elapsedMs: Long = 0L,
+    val resultCount: Int = 0,
+    val algorithm: String = "PRIMARY_KEY_HEAD [O(1)]",
+    val matchedField: String = "ALL",
+    val canCancel: Boolean = false
+)
+
 class HudViewModel(application: Application) : AndroidViewModel(application) {
 
     private val database = AppDatabase.getInstance(application)
@@ -77,22 +90,22 @@ class HudViewModel(application: Application) : AndroidViewModel(application) {
     private val _searchLatencyMs = MutableStateFlow(1L)
     val searchLatencyMs = _searchLatencyMs.asStateFlow()
 
-    // Ultra-Fast reactive search stream (optimized with 30ms debounce & latency telemetry)
-    val records: StateFlow<List<RecordEntity>> = combine(
-        _searchQuery.debounce(30),
-        _activeFilter
-    ) { query, filter ->
-        Pair(query, filter)
-    }.flatMapLatest { (query, filter) ->
-        val start = System.currentTimeMillis()
-        repository.searchRecords(query, filter).onEach {
-            _searchLatencyMs.value = (System.currentTimeMillis() - start).coerceAtLeast(1L)
-        }
-    }.stateIn(
-        scope = viewModelScope,
-        started = SharingStarted.WhileSubscribed(5000),
-        initialValue = emptyList()
-    )
+    // Real-Time Search Processing HUD State
+    private val _searchState = MutableStateFlow(SearchProcessingState())
+    val searchState = _searchState.asStateFlow()
+
+    private val _records = MutableStateFlow<List<RecordEntity>>(emptyList())
+    val records: StateFlow<List<RecordEntity>> = _records.asStateFlow()
+
+    private var searchJob: Job? = null
+    private var timerJob: Job? = null
+    private var activeImportJob: Job? = null
+    private var activeImportController: ImportController? = null
+
+    init {
+        // Initial load of latest database records
+        triggerSearch("", SearchFilter.ALL)
+    }
 
     fun completeSetup(password: String, enableBiometrics: Boolean) {
         securityPreferences.saveMasterPassword(password, enableBiometrics)
@@ -113,10 +126,96 @@ class HudViewModel(application: Application) : AndroidViewModel(application) {
 
     fun onSearchQueryChange(query: String) {
         _searchQuery.value = query
+        triggerSearch(query, _activeFilter.value)
     }
 
     fun onFilterChange(filter: SearchFilter) {
         _activeFilter.value = filter
+        triggerSearch(_searchQuery.value, filter)
+    }
+
+    /**
+     * Executes non-blocking, indexed search on Dispatchers.IO with real-time millisecond
+     * telemetry and cooperative coroutine cancellation.
+     */
+    private fun triggerSearch(query: String, filter: SearchFilter) {
+        searchJob?.cancel()
+        timerJob?.cancel()
+
+        val trimmedQuery = query.trim()
+        val startTime = System.currentTimeMillis()
+
+        _searchState.value = SearchProcessingState(
+            isSearching = true,
+            query = trimmedQuery,
+            filter = filter,
+            phase = if (trimmedQuery.isEmpty()) "RETRIEVING LATEST ARCHIVE ENTRIES..." else "INDEX SEEK: SCANNING 100M RECORD B-TREE...",
+            elapsedMs = 0L,
+            resultCount = _records.value.size,
+            algorithm = if (trimmedQuery.isEmpty()) "PRIMARY_KEY_HEAD [O(1)]" else "O(log N) B-TREE RANGE",
+            matchedField = filter.code,
+            canCancel = true
+        )
+
+        // Live ~60fps millisecond ticking coroutine so UI constantly shows active movement
+        timerJob = viewModelScope.launch(Dispatchers.Default) {
+            while (isActive) {
+                delay(16)
+                val currentElapsed = (System.currentTimeMillis() - startTime).coerceAtLeast(1L)
+                _searchState.value = _searchState.value.copy(elapsedMs = currentElapsed)
+            }
+        }
+
+        searchJob = viewModelScope.launch(Dispatchers.IO) {
+            try {
+                if (trimmedQuery.isNotEmpty()) {
+                    delay(35) // Small 35ms debounce for smooth keyboard typing
+                }
+
+                _searchState.value = _searchState.value.copy(phase = "TRAVERSING B-TREE LEAF PAGES...")
+                val result = repository.searchRecordsFast(trimmedQuery, filter, limit = 100)
+                val finalElapsed = (System.currentTimeMillis() - startTime).coerceAtLeast(1L)
+
+                timerJob?.cancel()
+                _records.value = result.records
+                _searchLatencyMs.value = finalElapsed
+                _searchState.value = SearchProcessingState(
+                    isSearching = false,
+                    query = trimmedQuery,
+                    filter = filter,
+                    phase = "INDEX QUERY RESOLVED",
+                    elapsedMs = finalElapsed,
+                    resultCount = result.records.size,
+                    algorithm = result.algorithmName,
+                    matchedField = result.matchedField,
+                    canCancel = false
+                )
+            } catch (e: CancellationException) {
+                // Cancelled cleanly due to new query or user abort
+            } catch (e: Exception) {
+                timerJob?.cancel()
+                _searchState.value = _searchState.value.copy(
+                    isSearching = false,
+                    phase = "ERROR: ${e.message}",
+                    canCancel = false
+                )
+                showFlash("SEARCH ERROR: ${e.localizedMessage}")
+            }
+        }
+    }
+
+    /**
+     * Instantly aborts an active search operation if user desires.
+     */
+    fun cancelSearch() {
+        searchJob?.cancel()
+        timerJob?.cancel()
+        _searchState.value = _searchState.value.copy(
+            isSearching = false,
+            phase = "SEARCH OPERATION ABORTED BY USER",
+            canCancel = false
+        )
+        showFlash("SEARCH ABORTED • ENGINE READY")
     }
 
     fun openImportDialog() {
@@ -165,19 +264,76 @@ class HudViewModel(application: Application) : AndroidViewModel(application) {
         showFlash("ERROR: $error")
     }
 
+    fun pauseImport() {
+        val ctrl = activeImportController
+        if (ctrl != null && !ctrl.isPaused) {
+            ctrl.pause()
+            _importProgress.value = _importProgress.value.copy(
+                isRunning = false,
+                isPaused = true,
+                canResume = true,
+                statusMessage = "PAUSE REQUESTED • COMMITTING CURRENT BATCH (ZERO DATA LOSS)..."
+            )
+            showFlash("IMPORT PAUSED • PROGRESS PRESERVED")
+        }
+    }
+
+    fun resumeImport() {
+        val ctrl = activeImportController
+        if (ctrl != null && ctrl.isPaused) {
+            ctrl.resume()
+            _importProgress.value = _importProgress.value.copy(
+                isRunning = true,
+                isPaused = false,
+                canResume = false,
+                statusMessage = "RESUMING INGESTION STREAM..."
+            )
+            showFlash("IMPORT RESUMED • STREAMING BATCHES")
+        }
+    }
+
+    fun cancelImport() {
+        val ctrl = activeImportController
+        ctrl?.cancel()
+        activeImportJob?.cancel()
+        activeImportController = null
+        val currentProgress = _importProgress.value
+        _importProgress.value = currentProgress.copy(
+            isRunning = false,
+            isPaused = false,
+            canResume = false,
+            isFinished = true,
+            statusMessage = "IMPORT CANCELLED BY OPERATOR • ${String.format("%,d", currentProgress.recordsImported)} RECORDS COMMITTED"
+        )
+        showFlash("IMPORT CANCELLED")
+        triggerSearch(_searchQuery.value, _activeFilter.value)
+    }
+
     fun importCsv(uri: Uri) {
-        viewModelScope.launch {
+        activeImportJob?.cancel()
+        val controller = ImportController()
+        activeImportController = controller
+
+        activeImportJob = viewModelScope.launch {
             try {
                 _importProgress.value = ImportProgress(
                     isRunning = true,
                     statusMessage = "OPENING SECURE DATA CHANNEL..."
                 )
-                repository.importCsvUri(getApplication(), uri).collect { progress ->
+                repository.importCsvUri(getApplication(), uri, controller).collect { progress ->
                     _importProgress.value = progress
                     if (progress.isFinished && progress.error == null) {
-                        showFlash("IMPORT COMPLETE: ${progress.recordsImported} RECORDS INDEXED")
+                        showFlash("IMPORT COMPLETE: ${String.format("%,d", progress.recordsImported)} RECORDS INDEXED")
+                        triggerSearch(_searchQuery.value, _activeFilter.value)
+                        activeImportController = null
                     }
                 }
+            } catch (e: CancellationException) {
+                _importProgress.value = _importProgress.value.copy(
+                    isRunning = false,
+                    isPaused = false,
+                    statusMessage = "IMPORT CANCELLED"
+                )
             } catch (e: Exception) {
                 _importProgress.value = ImportProgress(
                     isRunning = false,
@@ -186,24 +342,37 @@ class HudViewModel(application: Application) : AndroidViewModel(application) {
                     statusMessage = "CRITICAL: IMPORT ABORTED"
                 )
                 showFlash("IMPORT FAILED: ${e.message}")
+                activeImportController = null
             }
         }
     }
 
     fun importCsvString(content: String, sourceName: String = "CLIPBOARD_DATA.csv") {
-        viewModelScope.launch {
+        activeImportJob?.cancel()
+        val controller = ImportController()
+        activeImportController = controller
+
+        activeImportJob = viewModelScope.launch {
             try {
                 _importProgress.value = ImportProgress(
                     isRunning = true,
                     statusMessage = "PARSING CSV STREAM...",
                     fileName = sourceName
                 )
-                repository.importCsvString(getApplication(), content, sourceName).collect { progress ->
+                repository.importCsvString(getApplication(), content, sourceName, controller).collect { progress ->
                     _importProgress.value = progress
                     if (progress.isFinished && progress.error == null) {
-                        showFlash("IMPORT COMPLETE: ${progress.recordsImported} RECORDS INDEXED")
+                        showFlash("IMPORT COMPLETE: ${String.format("%,d", progress.recordsImported)} RECORDS INDEXED")
+                        triggerSearch(_searchQuery.value, _activeFilter.value)
+                        activeImportController = null
                     }
                 }
+            } catch (e: CancellationException) {
+                _importProgress.value = _importProgress.value.copy(
+                    isRunning = false,
+                    isPaused = false,
+                    statusMessage = "IMPORT CANCELLED"
+                )
             } catch (e: Exception) {
                 _importProgress.value = ImportProgress(
                     isRunning = false,
@@ -212,12 +381,17 @@ class HudViewModel(application: Application) : AndroidViewModel(application) {
                     statusMessage = "CRITICAL: IMPORT ABORTED"
                 )
                 showFlash("IMPORT FAILED: ${e.message}")
+                activeImportController = null
             }
         }
     }
 
     fun loadSampleBenchmark() {
-        viewModelScope.launch {
+        activeImportJob?.cancel()
+        val controller = ImportController()
+        activeImportController = controller
+
+        activeImportJob = viewModelScope.launch {
             try {
                 _importProgress.value = ImportProgress(
                     isRunning = true,
@@ -225,12 +399,20 @@ class HudViewModel(application: Application) : AndroidViewModel(application) {
                     fileName = "MELAT_BENCHMARK_100.csv"
                 )
                 val sampleCsv = com.example.data.SampleDataProvider.getSampleCsvString()
-                repository.importCsvString(getApplication(), sampleCsv, "MELAT_BENCHMARK_100.csv").collect { progress ->
+                repository.importCsvString(getApplication(), sampleCsv, "MELAT_BENCHMARK_100.csv", controller).collect { progress ->
                     _importProgress.value = progress
                     if (progress.isFinished && progress.error == null) {
                         showFlash("BENCHMARK LOADED: ${progress.recordsImported} CITIZENS ACTIVE")
+                        triggerSearch(_searchQuery.value, _activeFilter.value)
+                        activeImportController = null
                     }
                 }
+            } catch (e: CancellationException) {
+                _importProgress.value = _importProgress.value.copy(
+                    isRunning = false,
+                    isPaused = false,
+                    statusMessage = "BENCHMARK IMPORT CANCELLED"
+                )
             } catch (e: Exception) {
                 _importProgress.value = ImportProgress(
                     isRunning = false,
@@ -238,6 +420,7 @@ class HudViewModel(application: Application) : AndroidViewModel(application) {
                     error = e.localizedMessage ?: "Benchmark load failed",
                     statusMessage = "LOAD FAILED"
                 )
+                activeImportController = null
             }
         }
     }
@@ -246,6 +429,7 @@ class HudViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             repository.deleteRecord(id)
             showFlash("RECORD #$id PURGED FROM VAULT")
+            triggerSearch(_searchQuery.value, _activeFilter.value)
         }
     }
 
@@ -253,6 +437,7 @@ class HudViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val purged = repository.clearDatabase()
             showFlash("DATABASE PURGED: $purged RECORDS REMOVED")
+            triggerSearch("", _activeFilter.value)
         }
     }
 

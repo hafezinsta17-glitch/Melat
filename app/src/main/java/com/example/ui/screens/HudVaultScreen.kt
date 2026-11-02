@@ -41,6 +41,7 @@ import androidx.compose.material.icons.filled.CreditCard
 import androidx.compose.material.icons.filled.FileUpload
 import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material.icons.filled.LocationCity
+import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.Search
@@ -78,6 +79,8 @@ import com.example.ui.components.HudImportDialog
 import com.example.ui.components.HudRecordCard
 import com.example.ui.components.HudRecordDetailDialog
 import com.example.ui.components.HudScanningBeam
+import com.example.ui.components.HudSearchArchiveScanningView
+import com.example.ui.components.HudSearchProcessingBanner
 import com.example.ui.components.HudStatsDialog
 import com.example.ui.theme.HudAmber
 import com.example.ui.theme.HudBackground
@@ -177,6 +180,7 @@ fun HudVaultScreen(
     val searchQuery by viewModel.searchQuery.collectAsStateWithLifecycle()
     val activeFilter by viewModel.activeFilter.collectAsStateWithLifecycle()
     val searchLatency by viewModel.searchLatencyMs.collectAsStateWithLifecycle()
+    val searchState by viewModel.searchState.collectAsStateWithLifecycle()
     val importProgress by viewModel.importProgress.collectAsStateWithLifecycle()
     val isImportOpen by viewModel.isImportDialogOpen.collectAsStateWithLifecycle()
     val isStatsOpen by viewModel.isStatsDialogOpen.collectAsStateWithLifecycle()
@@ -366,6 +370,77 @@ fun HudVaultScreen(
                     // Futuristic Scanning Beam
                     HudScanningBeam(color = HudPrimary)
 
+                    // Active / Paused Ingestion Mini-HUD Floating Strip
+                    if ((importProgress.isRunning || importProgress.isPaused) && !isImportOpen) {
+                        HudFrameBox(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 4.dp)
+                                .clickable { viewModel.openImportDialog() },
+                            borderColor = if (importProgress.isPaused) HudAmber else HudSecondary,
+                            glowColor = if (importProgress.isPaused) HudAmber else HudSecondary,
+                            cornerLength = 6.dp,
+                            backgroundColor = Color(0xFF040E18)
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Icon(
+                                        imageVector = if (importProgress.isPaused) Icons.Default.Pause else Icons.Default.FileUpload,
+                                        contentDescription = null,
+                                        tint = if (importProgress.isPaused) HudAmber else HudSecondary,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = if (importProgress.isPaused) "INGESTION PAUSED:" else "INGESTION ACTIVE:",
+                                        fontFamily = OrbitronFontFamily,
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (importProgress.isPaused) HudAmber else HudSecondary
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = "${String.format("%,d", importProgress.recordsImported)} / ${if (importProgress.totalRecords > 0) String.format("%,d", importProgress.totalRecords) else "---"} (${String.format("%.1f%%", importProgress.percent)})",
+                                        fontFamily = ShareTechMonoFontFamily,
+                                        fontSize = 11.sp,
+                                        color = HudTextPrimary
+                                    )
+                                }
+
+                                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    if (importProgress.isPaused) {
+                                        HudButton(
+                                            onClick = { viewModel.resumeImport() },
+                                            text = "RESUME",
+                                            accentColor = HudSecondary,
+                                            modifier = Modifier
+                                                .height(34.dp)
+                                                .testTag("mini_resume_btn")
+                                        )
+                                    } else {
+                                        HudButton(
+                                            onClick = { viewModel.pauseImport() },
+                                            text = "PAUSE",
+                                            accentColor = HudAmber,
+                                            modifier = Modifier
+                                                .height(34.dp)
+                                                .testTag("mini_pause_btn")
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     // FAST FINANCIAL SEARCH CONSOLE INPUT
                     Box(
                         modifier = Modifier
@@ -457,6 +532,19 @@ fun HudVaultScreen(
                         }
                     }
 
+                    // Tactical Search Processing HUD Banner
+                    HudSearchProcessingBanner(
+                        isSearching = searchState.isSearching,
+                        query = searchQuery,
+                        filter = activeFilter,
+                        phase = searchState.phase,
+                        elapsedMs = searchState.elapsedMs,
+                        resultCount = records.size,
+                        algorithm = searchState.algorithm,
+                        matchedField = searchState.matchedField,
+                        onAbortClick = { viewModel.cancelSearch() }
+                    )
+
                     // FINANCIAL GRAPHIC CHIPS ROW
                     Row(
                         modifier = Modifier
@@ -536,8 +624,18 @@ fun HudVaultScreen(
                         )
                     }
 
-                    // Records List or Empty State (Real data only - demo data removed)
-                    if (records.isEmpty()) {
+                    // Records List, Archive Radar Scanning, or Empty State
+                    if (searchState.isSearching && records.isEmpty()) {
+                        HudSearchArchiveScanningView(
+                            query = searchQuery,
+                            filter = activeFilter,
+                            elapsedMs = searchState.elapsedMs,
+                            phase = searchState.phase,
+                            algorithm = searchState.algorithm,
+                            onAbortClick = { viewModel.cancelSearch() },
+                            modifier = Modifier.weight(1f)
+                        )
+                    } else if (records.isEmpty()) {
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -690,7 +788,10 @@ fun HudVaultScreen(
         onPickFromStorage = launchStoragePicker,
         onPickFromDocs = launchDocsPicker,
         onImportText = { text -> viewModel.importCsvString(text, "MANUAL_ENTRY.csv") },
-        onLoadSampleBenchmark = { viewModel.loadSampleBenchmark() }
+        onLoadSampleBenchmark = { viewModel.loadSampleBenchmark() },
+        onPauseImport = { viewModel.pauseImport() },
+        onResumeImport = { viewModel.resumeImport() },
+        onCancelImport = { viewModel.cancelImport() }
     )
 
     HudStatsDialog(

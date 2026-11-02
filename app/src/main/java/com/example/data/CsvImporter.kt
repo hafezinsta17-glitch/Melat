@@ -18,6 +18,8 @@ import java.nio.charset.StandardCharsets
 
 data class ImportProgress(
     val isRunning: Boolean = false,
+    val isPaused: Boolean = false,
+    val canResume: Boolean = false,
     val recordsImported: Int = 0,
     val totalRecords: Int = 0,
     val isTotalEstimated: Boolean = false,
@@ -34,6 +36,62 @@ data class ImportProgress(
     val bytesProcessed: Long = 0L,
     val totalBytes: Long = 0L
 )
+
+/**
+ * Thread-safe controller for pausing, resuming, and cancelling large CSV database imports.
+ * Allows suspending the streaming loop without data corruption or lost batches.
+ */
+class ImportController {
+    @Volatile
+    var isPaused: Boolean = false
+        private set
+
+    @Volatile
+    var isCancelled: Boolean = false
+        private set
+
+    private val lock = Any()
+    private var resumeSignal: kotlinx.coroutines.CompletableDeferred<Unit>? = null
+
+    fun pause() {
+        synchronized(lock) {
+            if (!isPaused && !isCancelled) {
+                isPaused = true
+                resumeSignal = kotlinx.coroutines.CompletableDeferred()
+            }
+        }
+    }
+
+    fun resume() {
+        synchronized(lock) {
+            if (isPaused) {
+                isPaused = false
+                val signal = resumeSignal
+                resumeSignal = null
+                signal?.complete(Unit)
+            }
+        }
+    }
+
+    fun cancel() {
+        synchronized(lock) {
+            isCancelled = true
+            isPaused = false
+            val signal = resumeSignal
+            resumeSignal = null
+            signal?.complete(Unit)
+        }
+    }
+
+    suspend fun awaitIfPaused(): Boolean {
+        if (isCancelled) return true
+        val signal = synchronized(lock) {
+            if (isPaused) resumeSignal else null
+        }
+        signal?.await()
+        return isCancelled
+    }
+}
 
 class CsvImporter(private val recordDao: RecordDao) {
 
@@ -234,7 +292,12 @@ class CsvImporter(private val recordDao: RecordDao) {
      * Imports from an Android content Uri by staging to a local cache file first.
      * This avoids all Storage Access Framework permission expiration and stream timeout issues.
      */
-    suspend fun importFromUri(context: Context, uri: Uri): Flow<ImportProgress> {
+    suspend fun importFromUri(
+        context: Context,
+        uri: Uri,
+        controller: ImportController = ImportController(),
+        startRecordOffset: Int = 0
+    ): Flow<ImportProgress> {
         val (fileName, reportedSize) = queryUriMetadata(context, uri)
         val formattedSize = if (reportedSize > 0) {
             when {
@@ -256,7 +319,7 @@ class CsvImporter(private val recordDao: RecordDao) {
             tempFile
         }
 
-        return importFile(cacheFile, fileName, formattedSize)
+        return importFile(cacheFile, fileName, formattedSize, controller = controller, startRecordOffset = startRecordOffset)
     }
 
     /**
@@ -265,7 +328,9 @@ class CsvImporter(private val recordDao: RecordDao) {
     suspend fun importFromString(
         context: Context,
         content: String,
-        sourceName: String = "CLIPBOARD_DATA.csv"
+        sourceName: String = "CLIPBOARD_DATA.csv",
+        controller: ImportController = ImportController(),
+        startRecordOffset: Int = 0
     ): Flow<ImportProgress> {
         val bytes = content.toByteArray(StandardCharsets.UTF_8)
         val formattedSize = when {
@@ -280,7 +345,7 @@ class CsvImporter(private val recordDao: RecordDao) {
             tempFile
         }
 
-        return importFile(cacheFile, sourceName, formattedSize)
+        return importFile(cacheFile, sourceName, formattedSize, controller = controller, startRecordOffset = startRecordOffset)
     }
 
     /**
@@ -339,7 +404,9 @@ class CsvImporter(private val recordDao: RecordDao) {
         file: File,
         fileName: String,
         fileSizeFormatted: String,
-        batchSize: Int = 2500
+        batchSize: Int = 2500,
+        controller: ImportController = ImportController(),
+        startRecordOffset: Int = 0
     ): Flow<ImportProgress> = flow {
         val totalBytes = file.length()
         emit(
@@ -456,7 +523,7 @@ class CsvImporter(private val recordDao: RecordDao) {
             var totalImported = 0
             var batchIndex = 0
             var bytesProcessed = 0L
-            val startTime = System.currentTimeMillis()
+            var activeStartTime = System.currentTimeMillis()
 
             BufferedReader(InputStreamReader(FileInputStream(file), StandardCharsets.UTF_8), 65536).use { reader ->
                 if (hasHeader) {
@@ -466,8 +533,131 @@ class CsvImporter(private val recordDao: RecordDao) {
                     }
                 }
 
+                if (startRecordOffset > 0) {
+                    var skipped = 0
+                    var skipLine: String? = null
+                    while (skipped < startRecordOffset && reader.readLine().also { skipLine = it } != null) {
+                        skipped++
+                        skipLine?.let { bytesProcessed += it.length + 1 }
+                    }
+                    totalImported = skipped
+                    batchIndex = skipped / batchSize
+                }
+
                 var line: String?
                 while (reader.readLine().also { line = it } != null) {
+                    // Check user cancellation request
+                    if (controller.isCancelled) {
+                        if (batch.isNotEmpty()) {
+                            recordDao.insertBatch(batch)
+                            totalImported += batch.size
+                            batchIndex++
+                            batch.clear()
+                        }
+                        emit(
+                            ImportProgress(
+                                isRunning = false,
+                                isPaused = false,
+                                canResume = false,
+                                isFinished = true,
+                                recordsImported = totalImported,
+                                totalRecords = totalRecordsCount,
+                                statusMessage = "IMPORT CANCELLED BY OPERATOR • ${String.format("%,d", totalImported)} RECORDS COMMITTED",
+                                fileName = fileName,
+                                fileSizeFormatted = fileSizeFormatted,
+                                bytesProcessed = bytesProcessed,
+                                totalBytes = totalBytes
+                            )
+                        )
+                        return@use
+                    }
+
+                    // Check user pause request
+                    if (controller.isPaused) {
+                        if (batch.isNotEmpty()) {
+                            recordDao.insertBatch(batch)
+                            totalImported += batch.size
+                            batchIndex++
+                            batch.clear()
+                        }
+
+                        val elapsedSec = ((System.currentTimeMillis() - activeStartTime) / 1000f).coerceAtLeast(0.1f)
+                        val rate = (totalImported / elapsedSec).toInt().coerceAtLeast(1)
+                        val calcPercent = if (totalRecordsCount > 0) {
+                            (totalImported.toFloat() / totalRecordsCount * 100f).coerceIn(0f, 99.5f)
+                        } else if (totalBytes > 0) {
+                            (bytesProcessed.toFloat() / totalBytes * 100f).coerceIn(0f, 99.5f)
+                        } else 0f
+                        val remaining = (totalRecordsCount - totalImported).coerceAtLeast(0)
+                        val eta = if (rate > 0) remaining / rate else 0
+
+                        emit(
+                            ImportProgress(
+                                isRunning = false,
+                                isPaused = true,
+                                canResume = true,
+                                recordsImported = totalImported,
+                                totalRecords = totalRecordsCount,
+                                isTotalEstimated = isEstimated,
+                                currentBatch = batchIndex,
+                                percent = calcPercent,
+                                recordsPerSecond = rate,
+                                etaSeconds = eta,
+                                elapsedSeconds = elapsedSec,
+                                statusMessage = "IMPORT PAUSED AT BATCH #$batchIndex • ${String.format("%,d", totalImported)} RECORDS COMMITTED (ZERO DATA LOST)",
+                                fileName = fileName,
+                                fileSizeFormatted = fileSizeFormatted,
+                                bytesProcessed = bytesProcessed,
+                                totalBytes = totalBytes
+                            )
+                        )
+
+                        val pauseTimestamp = System.currentTimeMillis()
+                        val wasCancelled = controller.awaitIfPaused()
+                        val pausedDuration = System.currentTimeMillis() - pauseTimestamp
+                        activeStartTime += pausedDuration
+
+                        if (wasCancelled) {
+                            emit(
+                                ImportProgress(
+                                    isRunning = false,
+                                    isPaused = false,
+                                    canResume = false,
+                                    isFinished = true,
+                                    recordsImported = totalImported,
+                                    totalRecords = totalRecordsCount,
+                                    statusMessage = "IMPORT CANCELLED WHILE PAUSED • ${String.format("%,d", totalImported)} RECORDS COMMITTED",
+                                    fileName = fileName,
+                                    fileSizeFormatted = fileSizeFormatted,
+                                    bytesProcessed = bytesProcessed,
+                                    totalBytes = totalBytes
+                                )
+                            )
+                            return@use
+                        } else {
+                            emit(
+                                ImportProgress(
+                                    isRunning = true,
+                                    isPaused = false,
+                                    canResume = false,
+                                    recordsImported = totalImported,
+                                    totalRecords = totalRecordsCount,
+                                    isTotalEstimated = isEstimated,
+                                    currentBatch = batchIndex,
+                                    percent = calcPercent,
+                                    recordsPerSecond = rate,
+                                    etaSeconds = eta,
+                                    elapsedSeconds = ((System.currentTimeMillis() - activeStartTime) / 1000f).coerceAtLeast(0.1f),
+                                    statusMessage = "RESUMING INGESTION FROM RECORD ${String.format("%,d", totalImported)}...",
+                                    fileName = fileName,
+                                    fileSizeFormatted = fileSizeFormatted,
+                                    bytesProcessed = bytesProcessed,
+                                    totalBytes = totalBytes
+                                )
+                            )
+                        }
+                    }
+
                     val current = line ?: continue
                     bytesProcessed += current.length + 1
                     if (current.isBlank()) continue
@@ -498,7 +688,7 @@ class CsvImporter(private val recordDao: RecordDao) {
                         batchIndex++
                         batch.clear()
 
-                        val elapsedSec = ((System.currentTimeMillis() - startTime) / 1000f).coerceAtLeast(0.1f)
+                        val elapsedSec = ((System.currentTimeMillis() - activeStartTime) / 1000f).coerceAtLeast(0.1f)
                         val rate = (totalImported / elapsedSec).toInt().coerceAtLeast(1)
                         val calcPercent = if (totalRecordsCount > 0) {
                             (totalImported.toFloat() / totalRecordsCount * 100f).coerceIn(0f, 99.5f)
@@ -512,6 +702,8 @@ class CsvImporter(private val recordDao: RecordDao) {
                         emit(
                             ImportProgress(
                                 isRunning = true,
+                                isPaused = false,
+                                canResume = false,
                                 recordsImported = totalImported,
                                 totalRecords = totalRecordsCount,
                                 isTotalEstimated = isEstimated,
@@ -538,12 +730,14 @@ class CsvImporter(private val recordDao: RecordDao) {
                 }
             }
 
-            val totalTime = ((System.currentTimeMillis() - startTime) / 1000f).coerceAtLeast(0.1f)
+            val totalTime = ((System.currentTimeMillis() - activeStartTime) / 1000f).coerceAtLeast(0.1f)
             val finalRate = (totalImported / totalTime).toInt().coerceAtLeast(1)
 
             emit(
                 ImportProgress(
                     isRunning = false,
+                    isPaused = false,
+                    canResume = false,
                     isFinished = true,
                     recordsImported = totalImported,
                     totalRecords = totalImported,
@@ -564,6 +758,8 @@ class CsvImporter(private val recordDao: RecordDao) {
             emit(
                 ImportProgress(
                     isRunning = false,
+                    isPaused = false,
+                    canResume = false,
                     isFinished = true,
                     error = e.localizedMessage ?: "Import operation failed",
                     statusMessage = "CRITICAL INGESTION ERROR",
@@ -573,7 +769,7 @@ class CsvImporter(private val recordDao: RecordDao) {
             )
         } finally {
             try {
-                if (file.exists()) file.delete()
+                if (!controller.isPaused && file.exists()) file.delete()
             } catch (_: Exception) {}
         }
     }.flowOn(Dispatchers.IO)

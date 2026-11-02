@@ -31,6 +31,8 @@ import androidx.compose.material.icons.filled.FileUpload
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -77,7 +79,10 @@ fun HudImportDialog(
     onPickFromStorage: () -> Unit,
     onPickFromDocs: () -> Unit,
     onImportText: (String) -> Unit,
-    onLoadSampleBenchmark: () -> Unit
+    onLoadSampleBenchmark: () -> Unit,
+    onPauseImport: () -> Unit,
+    onResumeImport: () -> Unit,
+    onCancelImport: () -> Unit
 ) {
     if (!isOpen) return
 
@@ -87,9 +92,7 @@ fun HudImportDialog(
     var inlineError by remember { mutableStateOf<String?>(null) }
 
     Dialog(
-        onDismissRequest = {
-            if (!progress.isRunning) onDismiss()
-        },
+        onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false)
     ) {
         Surface(
@@ -130,13 +133,13 @@ fun HudImportDialog(
                                 )
                                 Spacer(modifier = Modifier.width(8.dp))
                                 HudBadge(
-                                    text = "OFFLINE ENGINE",
-                                    color = HudSecondary,
+                                    text = if (progress.isPaused) "PAUSED" else if (progress.isRunning) "STREAMING" else "READY",
+                                    color = if (progress.isPaused) HudAmber else HudSecondary,
                                     indicatorOn = true
                                 )
                             }
                             Text(
-                                text = "STREAMING INGESTION TO ROOM DB",
+                                text = "STREAMING INGESTION TO ROOM DB • 100M ROWS READY",
                                 fontFamily = ShareTechMonoFontFamily,
                                 fontSize = 11.sp,
                                 color = HudTextMuted
@@ -145,13 +148,12 @@ fun HudImportDialog(
 
                         IconButton(
                             onClick = onDismiss,
-                            enabled = !progress.isRunning,
                             modifier = Modifier.testTag("import_dialog_close")
                         ) {
                             Icon(
                                 imageVector = Icons.Default.Close,
                                 contentDescription = "Close",
-                                tint = if (progress.isRunning) HudTextMuted else HudPrimary
+                                tint = HudPrimary
                             )
                         }
                     }
@@ -170,14 +172,15 @@ fun HudImportDialog(
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         // Live Process Bar, Record Counter & Telemetry Banner
-                        if (progress.isRunning || progress.recordsImported > 0 || progress.error != null || progress.statusMessage.isNotEmpty() || inlineError != null) {
+                        if (progress.isRunning || progress.isPaused || progress.recordsImported > 0 || progress.error != null || progress.statusMessage.isNotEmpty() || inlineError != null) {
                             val isError = progress.error != null || inlineError != null
                             val isSuccess = progress.isFinished && !isError
-                            val bannerColor = if (isError) HudAlert else if (isSuccess) HudSecondary else HudAmber
+                            val isPaused = progress.isPaused
+                            val bannerColor = if (isError) HudAlert else if (isSuccess) HudSecondary else if (isPaused) HudAmber else HudPrimary
 
                             val targetFraction = (progress.percent / 100f).coerceIn(0f, 1f)
                             val animatedProgress by animateFloatAsState(
-                                targetValue = if (progress.isRunning && targetFraction < 0.02f) 0.02f else targetFraction,
+                                targetValue = if ((progress.isRunning || isPaused) && targetFraction < 0.02f) 0.02f else targetFraction,
                                 label = "import_progress_anim"
                             )
 
@@ -205,6 +208,7 @@ fun HudImportDialog(
                                             Icon(
                                                 imageVector = if (isError) Icons.Default.ErrorOutline
                                                 else if (isSuccess) Icons.Default.CheckCircle
+                                                else if (isPaused) Icons.Default.Pause
                                                 else Icons.Default.FileUpload,
                                                 contentDescription = null,
                                                 tint = bannerColor,
@@ -214,6 +218,7 @@ fun HudImportDialog(
                                             Text(
                                                 text = if (isError) "INGESTION NOTICE"
                                                 else if (isSuccess) "DATABASE INGESTION COMPLETED"
+                                                else if (isPaused) "DATABASE INGESTION PAUSED (ZERO DATA LOST)"
                                                 else "DATABASE INGESTION PROCESS",
                                                 fontFamily = OrbitronFontFamily,
                                                 fontSize = 11.sp,
@@ -224,11 +229,11 @@ fun HudImportDialog(
 
                                         // Large Percentage readout
                                         Text(
-                                            text = String.format("[ %.1f%% ]", progress.percent),
+                                            text = if (isPaused) "[ PAUSED ]" else String.format("[ %.1f%% ]", progress.percent),
                                             fontFamily = OrbitronFontFamily,
                                             fontSize = 13.sp,
                                             fontWeight = FontWeight.Bold,
-                                            color = if (isSuccess) HudSecondary else HudAmber
+                                            color = if (isSuccess) HudSecondary else if (isPaused) HudAmber else HudPrimary
                                         )
                                     }
 
@@ -251,6 +256,8 @@ fun HudImportDialog(
                                                         brush = Brush.horizontalGradient(
                                                             colors = if (isSuccess) {
                                                                 listOf(HudSecondary.copy(alpha = 0.8f), HudSecondary)
+                                                            } else if (isPaused) {
+                                                                listOf(HudAmber.copy(alpha = 0.85f), HudAmber)
                                                             } else {
                                                                 listOf(HudPrimary, HudSecondary)
                                                             }
@@ -288,12 +295,20 @@ fun HudImportDialog(
                                             fontFamily = ShareTechMonoFontFamily,
                                             fontSize = 11.sp,
                                             fontWeight = FontWeight.Bold,
-                                            color = if (isSuccess) HudSecondary else HudTextPrimary
+                                            color = if (isSuccess) HudSecondary else if (isPaused) HudAmber else HudTextPrimary
                                         )
 
-                                        if (progress.recordsPerSecond > 0) {
+                                        if (progress.recordsPerSecond > 0 && !isPaused) {
                                             Text(
                                                 text = "${String.format("%,d", progress.recordsPerSecond)} RECS/SEC",
+                                                fontFamily = ShareTechMonoFontFamily,
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = HudAmber
+                                            )
+                                        } else if (isPaused) {
+                                            Text(
+                                                text = "PAUSED (SAFE)",
                                                 fontFamily = ShareTechMonoFontFamily,
                                                 fontSize = 11.sp,
                                                 fontWeight = FontWeight.Bold,
@@ -303,7 +318,7 @@ fun HudImportDialog(
                                     }
 
                                     // Telemetry Grid: Elapsed Time, ETA, and Batch
-                                    if (progress.isRunning || progress.isFinished) {
+                                    if (progress.isRunning || progress.isPaused || progress.isFinished) {
                                         Row(
                                             modifier = Modifier
                                                 .fillMaxWidth()
@@ -319,7 +334,7 @@ fun HudImportDialog(
                                                 color = HudTextSecondary
                                             )
                                             Text(
-                                                text = if (isSuccess) "STATUS: COMPLETE" else if (progress.etaSeconds > 0) "ETA: ${formatTime(progress.etaSeconds)}" else "ETA: CALCULATING...",
+                                                text = if (isSuccess) "STATUS: COMPLETE" else if (isPaused) "STATUS: PAUSED" else if (progress.etaSeconds > 0) "ETA: ${formatTime(progress.etaSeconds)}" else "ETA: CALCULATING...",
                                                 fontFamily = ShareTechMonoFontFamily,
                                                 fontSize = 10.sp,
                                                 color = if (isSuccess) HudSecondary else HudAmber
@@ -361,6 +376,68 @@ fun HudImportDialog(
                                             fontSize = 11.sp,
                                             color = HudAlert
                                         )
+                                    }
+
+                                    // TACTICAL HUD PAUSE / RESUME / ABORT INTERACTIVE CONTROLS
+                                    if (progress.isRunning || progress.isPaused) {
+                                        Spacer(modifier = Modifier.height(4.dp))
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                        ) {
+                                            if (progress.isPaused) {
+                                                HudButton(
+                                                    onClick = onResumeImport,
+                                                    text = "▶ RESUME INGESTION",
+                                                    accentColor = HudSecondary,
+                                                    modifier = Modifier
+                                                        .weight(1.4f)
+                                                        .testTag("btn_resume_import"),
+                                                    leadingIcon = {
+                                                        Icon(
+                                                            imageVector = Icons.Default.PlayArrow,
+                                                            contentDescription = null,
+                                                            tint = HudSecondary,
+                                                            modifier = Modifier.size(18.dp)
+                                                        )
+                                                    }
+                                                )
+                                            } else {
+                                                HudButton(
+                                                    onClick = onPauseImport,
+                                                    text = "|| PAUSE INGESTION",
+                                                    accentColor = HudAmber,
+                                                    modifier = Modifier
+                                                        .weight(1.4f)
+                                                        .testTag("btn_pause_import"),
+                                                    leadingIcon = {
+                                                        Icon(
+                                                            imageVector = Icons.Default.Pause,
+                                                            contentDescription = null,
+                                                            tint = HudAmber,
+                                                            modifier = Modifier.size(16.dp)
+                                                        )
+                                                    }
+                                                )
+                                            }
+
+                                            HudButton(
+                                                onClick = onCancelImport,
+                                                text = "ABORT",
+                                                accentColor = HudAlert,
+                                                modifier = Modifier
+                                                    .weight(0.9f)
+                                                    .testTag("btn_abort_import"),
+                                                leadingIcon = {
+                                                    Icon(
+                                                        imageVector = Icons.Default.Close,
+                                                        contentDescription = null,
+                                                        tint = HudAlert,
+                                                        modifier = Modifier.size(16.dp)
+                                                    )
+                                                }
+                                            )
+                                        }
                                     }
                                 }
                             }
