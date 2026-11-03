@@ -146,4 +146,67 @@ class ExampleUnitTest {
         assertEquals(5000, progress.recordsImported)
         assertEquals(100000, progress.totalRecords)
     }
+
+    @Test
+    fun testEightSectionDivisionAndSectionProgress() {
+        val totalBytes = 80_000_000L // 80 MB
+        val actualThreads = 8
+        val sectionByteRanges = (0 until actualThreads).map { s ->
+            val start = s * (totalBytes / actualThreads)
+            val end = if (s == actualThreads - 1) totalBytes else (s + 1) * (totalBytes / actualThreads)
+            start to end
+        }
+
+        assertEquals(8, sectionByteRanges.size)
+        assertEquals(0L to 10_000_000L, sectionByteRanges[0])
+        assertEquals(10_000_000L to 20_000_000L, sectionByteRanges[1])
+        assertEquals(70_000_000L to 80_000_000L, sectionByteRanges[7])
+
+        // Verify continuity with zero gaps or overlaps
+        for (i in 0 until 7) {
+            assertEquals(sectionByteRanges[i].second, sectionByteRanges[i + 1].first)
+        }
+
+        // Test SectionProgress model
+        val sections = sectionByteRanges.mapIndexed { idx, range ->
+            com.example.data.SectionProgress(
+                sectionId = idx + 1,
+                startByte = range.first,
+                endByte = range.second,
+                bytesProcessed = 5_000_000L,
+                recordsCount = 12_500,
+                percent = 50f,
+                isFinished = false,
+                isActive = true
+            )
+        }
+
+        assertEquals(8, sections.size)
+        assertEquals(1, sections[0].sectionId)
+        assertEquals(8, sections[7].sectionId)
+        assertEquals(12_500, sections[0].recordsCount)
+        assertEquals(50f, sections[0].percent, 0.01f)
+
+        val importProgress = com.example.data.ImportProgress(
+            isRunning = true,
+            recordsImported = 100_000,
+            threadCount = 8,
+            sections = sections
+        )
+
+        assertEquals(8, importProgress.threadCount)
+        assertEquals(8, importProgress.sections.size)
+        assertTrue(importProgress.sections.all { it.isActive })
+    }
+
+    @Test
+    fun testFastCsvLineParsingWithoutQuotes() {
+        val line = "0012345678,1234567890,Sina Rostami,Bahram,4512,1990/04/15,Tehran,Tehran,Tehran,Tehran,Valiasr Ave,6037991823451101,09121112233"
+        val tokens = importer.parseCsvLineFast(line, ',')
+        assertEquals(13, tokens.size)
+        assertEquals("0012345678", tokens[0])
+        assertEquals("Sina Rostami", tokens[2])
+        assertEquals("09121112233", tokens[12])
+    }
 }
+

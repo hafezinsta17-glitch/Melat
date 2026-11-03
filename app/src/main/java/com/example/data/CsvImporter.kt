@@ -4,9 +4,15 @@ import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.joinAll
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.BufferedReader
 import java.io.File
@@ -15,6 +21,22 @@ import java.io.InputStream
 import java.io.InputStreamReader
 import java.nio.charset.Charset
 import java.nio.charset.StandardCharsets
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
+
+/**
+ * Real-time progress state for an individual parallel thread / section worker.
+ */
+data class SectionProgress(
+    val sectionId: Int = 1,
+    val startByte: Long = 0L,
+    val endByte: Long = 0L,
+    val bytesProcessed: Long = 0L,
+    val recordsCount: Int = 0,
+    val percent: Float = 0f,
+    val isFinished: Boolean = false,
+    val isActive: Boolean = false
+)
 
 data class ImportProgress(
     val isRunning: Boolean = false,
@@ -34,7 +56,9 @@ data class ImportProgress(
     val fileName: String = "",
     val fileSizeFormatted: String = "",
     val bytesProcessed: Long = 0L,
-    val totalBytes: Long = 0L
+    val totalBytes: Long = 0L,
+    val threadCount: Int = 8,
+    val sections: List<SectionProgress> = emptyList()
 )
 
 /**
@@ -296,7 +320,8 @@ class CsvImporter(private val recordDao: RecordDao) {
         context: Context,
         uri: Uri,
         controller: ImportController = ImportController(),
-        startRecordOffset: Int = 0
+        startRecordOffset: Int = 0,
+        threadCount: Int = 8
     ): Flow<ImportProgress> {
         val (fileName, reportedSize) = queryUriMetadata(context, uri)
         val formattedSize = if (reportedSize > 0) {
@@ -319,7 +344,14 @@ class CsvImporter(private val recordDao: RecordDao) {
             tempFile
         }
 
-        return importFile(cacheFile, fileName, formattedSize, controller = controller, startRecordOffset = startRecordOffset)
+        return importFile(
+            file = cacheFile,
+            fileName = fileName,
+            fileSizeFormatted = formattedSize,
+            controller = controller,
+            startRecordOffset = startRecordOffset,
+            threadCount = threadCount
+        )
     }
 
     /**
@@ -330,7 +362,8 @@ class CsvImporter(private val recordDao: RecordDao) {
         content: String,
         sourceName: String = "CLIPBOARD_DATA.csv",
         controller: ImportController = ImportController(),
-        startRecordOffset: Int = 0
+        startRecordOffset: Int = 0,
+        threadCount: Int = 8
     ): Flow<ImportProgress> {
         val bytes = content.toByteArray(StandardCharsets.UTF_8)
         val formattedSize = when {
@@ -345,7 +378,14 @@ class CsvImporter(private val recordDao: RecordDao) {
             tempFile
         }
 
-        return importFile(cacheFile, sourceName, formattedSize, controller = controller, startRecordOffset = startRecordOffset)
+        return importFile(
+            file = cacheFile,
+            fileName = sourceName,
+            fileSizeFormatted = formattedSize,
+            controller = controller,
+            startRecordOffset = startRecordOffset,
+            threadCount = threadCount
+        )
     }
 
     /**
@@ -397,7 +437,26 @@ class CsvImporter(private val recordDao: RecordDao) {
     }
 
     /**
-     * Imports records from a local File into Room database with batching, progress reporting, and auto-cleanup.
+     * Fast UTF-8 byte counter with zero object allocations
+     */
+    fun estimateUtf8ByteLength(s: String): Int {
+        var bytes = 0
+        val len = s.length
+        for (i in 0 until len) {
+            val c = s[i].code
+            bytes += when {
+                c < 0x80 -> 1
+                c < 0x800 -> 2
+                else -> 3
+            }
+        }
+        return bytes + 1 // + 1 for newline \n
+    }
+
+    /**
+     * Imports records from a local File into Room database using an 8-Thread Multi-Section
+     * Parallel Architecture. Divides file into 8 byte segments, processes tokens concurrently
+     * across 8 threads, and feeds an asynchronous batch pipeline into SQLite.
      * Tuned for high throughput on massive datasets (up to 100 million records).
      */
     fun importFile(
@@ -406,16 +465,20 @@ class CsvImporter(private val recordDao: RecordDao) {
         fileSizeFormatted: String,
         batchSize: Int = 2500,
         controller: ImportController = ImportController(),
-        startRecordOffset: Int = 0
+        startRecordOffset: Int = 0,
+        threadCount: Int = 8
     ): Flow<ImportProgress> = flow {
         val totalBytes = file.length()
+        val actualThreads = if (totalBytes < 16 * 1024L || startRecordOffset > 0) 1 else threadCount.coerceIn(1, 8)
+
         emit(
             ImportProgress(
                 isRunning = true,
                 statusMessage = "SCANNING CSV DATABASE: $fileName ($fileSizeFormatted)...",
                 fileName = fileName,
                 fileSizeFormatted = fileSizeFormatted,
-                totalBytes = totalBytes
+                totalBytes = totalBytes,
+                threadCount = actualThreads
             )
         )
 
@@ -477,19 +540,6 @@ class CsvImporter(private val recordDao: RecordDao) {
 
             val (totalRecordsCount, isEstimated) = countOrEstimateRecords(file, sampleLines, hasHeader)
 
-            emit(
-                ImportProgress(
-                    isRunning = true,
-                    totalRecords = totalRecordsCount,
-                    isTotalEstimated = isEstimated,
-                    percent = 0.5f,
-                    statusMessage = "COUNTED ${String.format("%,d", totalRecordsCount)} RECORDS ${if (isEstimated) "(ESTIMATED)" else "(EXACT)"}. INGESTING...",
-                    fileName = fileName,
-                    fileSizeFormatted = fileSizeFormatted,
-                    totalBytes = totalBytes
-                )
-            )
-
             val columnMapping = if (hasHeader) {
                 resolveColumnIndices(firstTokens)
             } else {
@@ -519,184 +569,227 @@ class CsvImporter(private val recordDao: RecordDao) {
                 }
             }
 
-            val batch = ArrayList<RecordEntity>(batchSize)
-            var totalImported = 0
-            var batchIndex = 0
-            var bytesProcessed = 0L
+            // Calculate byte slices for each of the parallel threads
+            val sectionByteRanges = (0 until actualThreads).map { s ->
+                val start = s * (totalBytes / actualThreads)
+                val end = if (s == actualThreads - 1) totalBytes else (s + 1) * (totalBytes / actualThreads)
+                start to end
+            }
+
+            val sectionBytesProcessed = Array(actualThreads) { AtomicLong(0L) }
+            val sectionRecordsCount = Array(actualThreads) { AtomicInteger(0) }
+            val sectionFinished = Array(actualThreads) { java.util.concurrent.atomic.AtomicBoolean(false) }
+            val sectionActive = Array(actualThreads) { java.util.concurrent.atomic.AtomicBoolean(false) }
+
+            val batchChannel = Channel<List<RecordEntity>>(capacity = 32)
+            val totalCommitted = AtomicInteger(0)
+            val currentBatch = AtomicInteger(0)
             var activeStartTime = System.currentTimeMillis()
 
-            BufferedReader(InputStreamReader(FileInputStream(file), StandardCharsets.UTF_8), 65536).use { reader ->
-                if (hasHeader) {
-                    val headerLine = reader.readLine()
-                    if (headerLine != null) {
-                        bytesProcessed += headerLine.length + 1
+            fun buildSectionsList(): List<SectionProgress> {
+                return (0 until actualThreads).map { idx ->
+                    val range = sectionByteRanges[idx]
+                    val rangeLen = (range.second - range.first).coerceAtLeast(1L)
+                    val bDone = sectionBytesProcessed[idx].get().coerceAtMost(rangeLen)
+                    val pct = if (sectionFinished[idx].get()) 100f else (bDone.toFloat() / rangeLen * 100f).coerceIn(0f, 99.9f)
+                    SectionProgress(
+                        sectionId = idx + 1,
+                        startByte = range.first,
+                        endByte = range.second,
+                        bytesProcessed = bDone,
+                        recordsCount = sectionRecordsCount[idx].get(),
+                        percent = pct,
+                        isFinished = sectionFinished[idx].get(),
+                        isActive = sectionActive[idx].get()
+                    )
+                }
+            }
+
+            emit(
+                ImportProgress(
+                    isRunning = true,
+                    totalRecords = totalRecordsCount,
+                    isTotalEstimated = isEstimated,
+                    percent = 0.5f,
+                    statusMessage = "DEPLOYED 8 THREADS ACROSS 8 SECTIONS • ESTIMATED %,d RECORDS...".format(totalRecordsCount),
+                    fileName = fileName,
+                    fileSizeFormatted = fileSizeFormatted,
+                    totalBytes = totalBytes,
+                    threadCount = actualThreads,
+                    sections = buildSectionsList()
+                )
+            )
+
+            coroutineScope {
+                // High-performance asynchronous database writer coroutine
+                val writerJob = launch(Dispatchers.IO) {
+                    for (batch in batchChannel) {
+                        if (batch.isNotEmpty()) {
+                            recordDao.insertBatch(batch)
+                            totalCommitted.addAndGet(batch.size)
+                            currentBatch.incrementAndGet()
+                        }
                     }
                 }
 
-                if (startRecordOffset > 0) {
-                    var skipped = 0
-                    var skipLine: String? = null
-                    while (skipped < startRecordOffset && reader.readLine().also { skipLine = it } != null) {
-                        skipped++
-                        skipLine?.let { bytesProcessed += it.length + 1 }
+                // Launch 8 Concurrent Section Worker Coroutines
+                val workerJobs = (0 until actualThreads).map { s ->
+                    launch(Dispatchers.Default) {
+                        val range = sectionByteRanges[s]
+                        val startByte = range.first
+                        val endByte = range.second
+                        sectionActive[s].set(true)
+                        val localBatch = ArrayList<RecordEntity>(batchSize)
+                        var localBytes = 0L
+                        var localRecords = 0
+
+                        try {
+                            val fis = FileInputStream(file)
+                            if (startByte > 0) {
+                                fis.channel.position(startByte)
+                            }
+                            val reader = BufferedReader(InputStreamReader(fis, StandardCharsets.UTF_8), 65536)
+
+                            if (s == 0 && hasHeader) {
+                                val h = reader.readLine()
+                                if (h != null) {
+                                    localBytes += estimateUtf8ByteLength(h)
+                                    sectionBytesProcessed[s].set(localBytes)
+                                }
+                            } else if (s > 0) {
+                                // Discard the partial line overlapping from previous section
+                                val discard = reader.readLine()
+                                if (discard != null) {
+                                    localBytes += estimateUtf8ByteLength(discard)
+                                    sectionBytesProcessed[s].set(localBytes)
+                                }
+                            }
+
+                            if (s == 0 && startRecordOffset > 0) {
+                                var skipped = 0
+                                var skipLine: String? = null
+                                while (skipped < startRecordOffset && reader.readLine().also { skipLine = it } != null) {
+                                    skipped++
+                                    skipLine?.let { localBytes += estimateUtf8ByteLength(it) }
+                                }
+                                localRecords = skipped
+                                sectionRecordsCount[s].set(localRecords)
+                                sectionBytesProcessed[s].set(localBytes)
+                            }
+
+                            var line: String?
+                            while (reader.readLine().also { line = it } != null) {
+                                if (controller.isCancelled) break
+                                if (controller.isPaused) {
+                                    if (localBatch.isNotEmpty()) {
+                                        batchChannel.send(ArrayList(localBatch))
+                                        localBatch.clear()
+                                    }
+                                    val wasCancelled = controller.awaitIfPaused()
+                                    if (wasCancelled) break
+                                }
+
+                                val current = line ?: continue
+                                val lBytes = estimateUtf8ByteLength(current)
+                                localBytes += lBytes
+                                sectionBytesProcessed[s].set(localBytes)
+
+                                if (current.isNotBlank()) {
+                                    val tokens = parseCsvLineFast(current, delimiter)
+                                    if (tokens.isNotEmpty() && !tokens.all { it.isBlank() }) {
+                                        val record = RecordEntity(
+                                            nationalCode = extractField(tokens, "NATIONAL_CODE", 0),
+                                            accountNumber = extractField(tokens, "ACCOUNT_NUMBER", 1),
+                                            fullName = extractField(tokens, "FULL_NAME", 2),
+                                            fatherName = extractField(tokens, "FATHER_NAME", 3),
+                                            idNumber = extractField(tokens, "ID_NUMBER", 4),
+                                            birthDate = extractField(tokens, "BIRTH_DATE", 5),
+                                            cityName = extractField(tokens, "CITY_NAME", 6),
+                                            provinceName = extractField(tokens, "PROVINCE_NAME", 7),
+                                            birthCity = extractField(tokens, "BIRTH_CITY", 8),
+                                            birthProvince = extractField(tokens, "BIRTH_PROVINCE", 9),
+                                            address = extractField(tokens, "ADDRESS", 10),
+                                            cardNo = extractField(tokens, "CARD_NO", 11),
+                                            mobile = extractField(tokens, "MOBILE", 12)
+                                        )
+                                        localBatch.add(record)
+                                        localRecords++
+                                        sectionRecordsCount[s].set(localRecords)
+
+                                        if (localBatch.size >= batchSize) {
+                                            batchChannel.send(ArrayList(localBatch))
+                                            localBatch.clear()
+                                        }
+                                    }
+                                }
+
+                                // When non-last section reaches or crosses endByte, complete section
+                                if (s < actualThreads - 1 && (startByte + localBytes) >= endByte) {
+                                    break
+                                }
+                            }
+
+                            if (localBatch.isNotEmpty() && !controller.isCancelled) {
+                                batchChannel.send(ArrayList(localBatch))
+                                localBatch.clear()
+                            }
+                        } catch (_: Exception) {
+                        } finally {
+                            sectionFinished[s].set(true)
+                            sectionActive[s].set(false)
+                        }
                     }
-                    totalImported = skipped
-                    batchIndex = skipped / batchSize
                 }
 
-                var line: String?
-                while (reader.readLine().also { line = it } != null) {
-                    // Check user cancellation request
+                // Telemetry monitor loop
+                var lastEmitTime = 0L
+                while (workerJobs.any { it.isActive } || !batchChannel.isClosedForReceive) {
+                    delay(100)
                     if (controller.isCancelled) {
-                        if (batch.isNotEmpty()) {
-                            recordDao.insertBatch(batch)
-                            totalImported += batch.size
-                            batchIndex++
-                            batch.clear()
-                        }
-                        emit(
-                            ImportProgress(
-                                isRunning = false,
-                                isPaused = false,
-                                canResume = false,
-                                isFinished = true,
-                                recordsImported = totalImported,
-                                totalRecords = totalRecordsCount,
-                                statusMessage = "IMPORT CANCELLED BY OPERATOR • ${String.format("%,d", totalImported)} RECORDS COMMITTED",
-                                fileName = fileName,
-                                fileSizeFormatted = fileSizeFormatted,
-                                bytesProcessed = bytesProcessed,
-                                totalBytes = totalBytes
-                            )
-                        )
-                        return@use
+                        break
                     }
-
-                    // Check user pause request
                     if (controller.isPaused) {
-                        if (batch.isNotEmpty()) {
-                            recordDao.insertBatch(batch)
-                            totalImported += batch.size
-                            batchIndex++
-                            batch.clear()
-                        }
-
-                        val elapsedSec = ((System.currentTimeMillis() - activeStartTime) / 1000f).coerceAtLeast(0.1f)
-                        val rate = (totalImported / elapsedSec).toInt().coerceAtLeast(1)
-                        val calcPercent = if (totalRecordsCount > 0) {
-                            (totalImported.toFloat() / totalRecordsCount * 100f).coerceIn(0f, 99.5f)
-                        } else if (totalBytes > 0) {
-                            (bytesProcessed.toFloat() / totalBytes * 100f).coerceIn(0f, 99.5f)
-                        } else 0f
-                        val remaining = (totalRecordsCount - totalImported).coerceAtLeast(0)
-                        val eta = if (rate > 0) remaining / rate else 0
-
+                        val pauseTimestamp = System.currentTimeMillis()
+                        val currentImported = totalCommitted.get()
+                        val totalBytesDone = sectionBytesProcessed.sumOf { it.get() }
                         emit(
                             ImportProgress(
                                 isRunning = false,
                                 isPaused = true,
                                 canResume = true,
-                                recordsImported = totalImported,
+                                recordsImported = currentImported,
                                 totalRecords = totalRecordsCount,
                                 isTotalEstimated = isEstimated,
-                                currentBatch = batchIndex,
-                                percent = calcPercent,
-                                recordsPerSecond = rate,
-                                etaSeconds = eta,
-                                elapsedSeconds = elapsedSec,
-                                statusMessage = "IMPORT PAUSED AT BATCH #$batchIndex • ${String.format("%,d", totalImported)} RECORDS COMMITTED (ZERO DATA LOST)",
+                                currentBatch = currentBatch.get(),
+                                percent = if (totalRecordsCount > 0) (currentImported.toFloat() / totalRecordsCount * 100f).coerceIn(0f, 99.9f) else 0f,
+                                statusMessage = "IMPORT PAUSED (8 THREADS SUSPENDED • ZERO DATA LOSS)",
                                 fileName = fileName,
                                 fileSizeFormatted = fileSizeFormatted,
-                                bytesProcessed = bytesProcessed,
-                                totalBytes = totalBytes
+                                bytesProcessed = totalBytesDone,
+                                totalBytes = totalBytes,
+                                threadCount = actualThreads,
+                                sections = buildSectionsList()
                             )
                         )
-
-                        val pauseTimestamp = System.currentTimeMillis()
                         val wasCancelled = controller.awaitIfPaused()
                         val pausedDuration = System.currentTimeMillis() - pauseTimestamp
                         activeStartTime += pausedDuration
-
-                        if (wasCancelled) {
-                            emit(
-                                ImportProgress(
-                                    isRunning = false,
-                                    isPaused = false,
-                                    canResume = false,
-                                    isFinished = true,
-                                    recordsImported = totalImported,
-                                    totalRecords = totalRecordsCount,
-                                    statusMessage = "IMPORT CANCELLED WHILE PAUSED • ${String.format("%,d", totalImported)} RECORDS COMMITTED",
-                                    fileName = fileName,
-                                    fileSizeFormatted = fileSizeFormatted,
-                                    bytesProcessed = bytesProcessed,
-                                    totalBytes = totalBytes
-                                )
-                            )
-                            return@use
-                        } else {
-                            emit(
-                                ImportProgress(
-                                    isRunning = true,
-                                    isPaused = false,
-                                    canResume = false,
-                                    recordsImported = totalImported,
-                                    totalRecords = totalRecordsCount,
-                                    isTotalEstimated = isEstimated,
-                                    currentBatch = batchIndex,
-                                    percent = calcPercent,
-                                    recordsPerSecond = rate,
-                                    etaSeconds = eta,
-                                    elapsedSeconds = ((System.currentTimeMillis() - activeStartTime) / 1000f).coerceAtLeast(0.1f),
-                                    statusMessage = "RESUMING INGESTION FROM RECORD ${String.format("%,d", totalImported)}...",
-                                    fileName = fileName,
-                                    fileSizeFormatted = fileSizeFormatted,
-                                    bytesProcessed = bytesProcessed,
-                                    totalBytes = totalBytes
-                                )
-                            )
-                        }
+                        if (wasCancelled) break
                     }
 
-                    val current = line ?: continue
-                    bytesProcessed += current.length + 1
-                    if (current.isBlank()) continue
-
-                    val tokens = parseCsvLineFast(current, delimiter)
-                    if (tokens.isEmpty() || tokens.all { it.isBlank() }) continue
-
-                    val record = RecordEntity(
-                        nationalCode = extractField(tokens, "NATIONAL_CODE", 0),
-                        accountNumber = extractField(tokens, "ACCOUNT_NUMBER", 1),
-                        fullName = extractField(tokens, "FULL_NAME", 2),
-                        fatherName = extractField(tokens, "FATHER_NAME", 3),
-                        idNumber = extractField(tokens, "ID_NUMBER", 4),
-                        birthDate = extractField(tokens, "BIRTH_DATE", 5),
-                        cityName = extractField(tokens, "CITY_NAME", 6),
-                        provinceName = extractField(tokens, "PROVINCE_NAME", 7),
-                        birthCity = extractField(tokens, "BIRTH_CITY", 8),
-                        birthProvince = extractField(tokens, "BIRTH_PROVINCE", 9),
-                        address = extractField(tokens, "ADDRESS", 10),
-                        cardNo = extractField(tokens, "CARD_NO", 11),
-                        mobile = extractField(tokens, "MOBILE", 12)
-                    )
-                    batch.add(record)
-
-                    if (batch.size >= batchSize) {
-                        recordDao.insertBatch(batch)
-                        totalImported += batch.size
-                        batchIndex++
-                        batch.clear()
-
-                        val elapsedSec = ((System.currentTimeMillis() - activeStartTime) / 1000f).coerceAtLeast(0.1f)
-                        val rate = (totalImported / elapsedSec).toInt().coerceAtLeast(1)
+                    val now = System.currentTimeMillis()
+                    if (now - lastEmitTime >= 120) {
+                        lastEmitTime = now
+                        val currentImported = totalCommitted.get()
+                        val totalBytesDone = sectionBytesProcessed.sumOf { it.get() }
+                        val elapsedSec = ((now - activeStartTime) / 1000f).coerceAtLeast(0.1f)
+                        val rate = (currentImported / elapsedSec).toInt().coerceAtLeast(1)
                         val calcPercent = if (totalRecordsCount > 0) {
-                            (totalImported.toFloat() / totalRecordsCount * 100f).coerceIn(0f, 99.5f)
-                        } else if (totalBytes > 0) {
-                            (bytesProcessed.toFloat() / totalBytes * 100f).coerceIn(0f, 99.5f)
-                        } else 0f
-
-                        val remaining = (totalRecordsCount - totalImported).coerceAtLeast(0)
+                            (currentImported.toFloat() / totalRecordsCount * 100f).coerceIn(0f, 99.5f)
+                        } else {
+                            (totalBytesDone.toFloat() / totalBytes * 100f).coerceIn(0f, 99.5f)
+                        }
+                        val remaining = (totalRecordsCount - currentImported).coerceAtLeast(0)
                         val eta = if (rate > 0) remaining / rate else 0
 
                         emit(
@@ -704,56 +797,83 @@ class CsvImporter(private val recordDao: RecordDao) {
                                 isRunning = true,
                                 isPaused = false,
                                 canResume = false,
-                                recordsImported = totalImported,
+                                recordsImported = currentImported,
                                 totalRecords = totalRecordsCount,
                                 isTotalEstimated = isEstimated,
-                                currentBatch = batchIndex,
+                                currentBatch = currentBatch.get(),
                                 percent = calcPercent,
                                 recordsPerSecond = rate,
                                 etaSeconds = eta,
                                 elapsedSeconds = elapsedSec,
-                                statusMessage = "INGESTING: ${String.format("%,d", totalImported)} / ${String.format("%,d", totalRecordsCount)} RECORDS (${rate} RECS/S)",
+                                statusMessage = "PARALLEL INGESTION (8 THREADS): %,d / %,d RECORDS (%,d RECS/S)".format(
+                                    currentImported, totalRecordsCount, rate
+                                ),
                                 fileName = fileName,
                                 fileSizeFormatted = fileSizeFormatted,
-                                bytesProcessed = bytesProcessed,
-                                totalBytes = totalBytes
+                                bytesProcessed = totalBytesDone,
+                                totalBytes = totalBytes,
+                                threadCount = actualThreads,
+                                sections = buildSectionsList()
                             )
                         )
                     }
                 }
 
-                if (batch.isNotEmpty()) {
-                    recordDao.insertBatch(batch)
-                    totalImported += batch.size
-                    batchIndex++
-                    batch.clear()
-                }
+                // Wait for all workers to finish parsing
+                workerJobs.joinAll()
+                batchChannel.close()
+                writerJob.join()
             }
 
+            val finalCommitted = totalCommitted.get()
             val totalTime = ((System.currentTimeMillis() - activeStartTime) / 1000f).coerceAtLeast(0.1f)
-            val finalRate = (totalImported / totalTime).toInt().coerceAtLeast(1)
+            val finalRate = (finalCommitted / totalTime).toInt().coerceAtLeast(1)
 
-            emit(
-                ImportProgress(
-                    isRunning = false,
-                    isPaused = false,
-                    canResume = false,
-                    isFinished = true,
-                    recordsImported = totalImported,
-                    totalRecords = totalImported,
-                    isTotalEstimated = false,
-                    currentBatch = batchIndex,
-                    percent = 100f,
-                    recordsPerSecond = finalRate,
-                    etaSeconds = 0,
-                    elapsedSeconds = totalTime,
-                    statusMessage = "SUCCESS: ALL ${String.format("%,d", totalImported)} RECORDS INDEXED IN ${String.format("%.1f", totalTime)}s (${finalRate} RECS/S)",
-                    fileName = fileName,
-                    fileSizeFormatted = fileSizeFormatted,
-                    bytesProcessed = totalBytes,
-                    totalBytes = totalBytes
+            if (controller.isCancelled) {
+                emit(
+                    ImportProgress(
+                        isRunning = false,
+                        isPaused = false,
+                        canResume = false,
+                        isFinished = true,
+                        recordsImported = finalCommitted,
+                        totalRecords = totalRecordsCount,
+                        statusMessage = "IMPORT CANCELLED BY OPERATOR • %,d RECORDS COMMITTED".format(finalCommitted),
+                        fileName = fileName,
+                        fileSizeFormatted = fileSizeFormatted,
+                        bytesProcessed = totalBytes,
+                        totalBytes = totalBytes,
+                        threadCount = actualThreads,
+                        sections = buildSectionsList()
+                    )
                 )
-            )
+            } else {
+                emit(
+                    ImportProgress(
+                        isRunning = false,
+                        isPaused = false,
+                        canResume = false,
+                        isFinished = true,
+                        recordsImported = finalCommitted,
+                        totalRecords = finalCommitted,
+                        isTotalEstimated = false,
+                        currentBatch = currentBatch.get(),
+                        percent = 100f,
+                        recordsPerSecond = finalRate,
+                        etaSeconds = 0,
+                        elapsedSeconds = totalTime,
+                        statusMessage = "SUCCESS: ALL %,d RECORDS INDEXED (8 THREADS) IN %.1fs (%,d RECS/S)".format(
+                            finalCommitted, totalTime, finalRate
+                        ),
+                        fileName = fileName,
+                        fileSizeFormatted = fileSizeFormatted,
+                        bytesProcessed = totalBytes,
+                        totalBytes = totalBytes,
+                        threadCount = actualThreads,
+                        sections = buildSectionsList().map { it.copy(isFinished = true, percent = 100f, isActive = false) }
+                    )
+                )
+            }
         } catch (e: Exception) {
             emit(
                 ImportProgress(

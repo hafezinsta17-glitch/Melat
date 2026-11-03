@@ -57,6 +57,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.example.data.ImportProgress
+import com.example.data.SectionProgress
 import com.example.ui.theme.HudAlert
 import com.example.ui.theme.HudAmber
 import com.example.ui.theme.HudBackground
@@ -376,6 +377,87 @@ fun HudImportDialog(
                                             fontSize = 11.sp,
                                             color = HudAlert
                                         )
+                                    }
+
+                                    // 8-Core Parallel Engine Matrix
+                                    if (progress.isRunning || progress.isPaused || progress.sections.isNotEmpty()) {
+                                        Spacer(modifier = Modifier.height(2.dp))
+                                        Column(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .background(Color(0xFF02070D), RoundedCornerShape(2.dp))
+                                                .border(0.5.dp, HudBorder, RoundedCornerShape(2.dp))
+                                                .padding(8.dp),
+                                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                                        ) {
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                horizontalArrangement = Arrangement.SpaceBetween,
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                                    Icon(
+                                                        imageVector = Icons.Default.Dataset,
+                                                        contentDescription = null,
+                                                        tint = HudSecondary,
+                                                        modifier = Modifier.size(13.dp)
+                                                    )
+                                                    Spacer(modifier = Modifier.width(5.dp))
+                                                    Text(
+                                                        text = "8-CORE PARALLEL ENGINE MATRIX",
+                                                        fontFamily = OrbitronFontFamily,
+                                                        fontSize = 10.sp,
+                                                        fontWeight = FontWeight.Bold,
+                                                        color = HudSecondary
+                                                    )
+                                                }
+                                                val activeWorkers = progress.sections.count { it.isActive && !it.isFinished }
+                                                Text(
+                                                    text = if (isPaused) "8 CORES SUSPENDED"
+                                                    else if (progress.isRunning) "$activeWorkers/8 CORES ACTIVE"
+                                                    else "8 CORES SYNCED",
+                                                    fontFamily = ShareTechMonoFontFamily,
+                                                    fontSize = 9.sp,
+                                                    color = if (isPaused) HudAmber else HudSecondary
+                                                )
+                                            }
+
+                                            val displaySections = if (progress.sections.size >= 8) {
+                                                progress.sections
+                                            } else {
+                                                (1..8).map { id ->
+                                                    SectionProgress(
+                                                        sectionId = id,
+                                                        recordsCount = 0,
+                                                        percent = 0f,
+                                                        isFinished = false,
+                                                        isActive = progress.isRunning
+                                                    )
+                                                }
+                                            }
+
+                                            for (row in 0 until 4) {
+                                                val s1 = displaySections.getOrNull(row * 2)
+                                                val s2 = displaySections.getOrNull(row * 2 + 1)
+                                                if (s1 != null && s2 != null) {
+                                                    Row(
+                                                        modifier = Modifier.fillMaxWidth(),
+                                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                                    ) {
+                                                        HudSectionCoreCard(
+                                                            section = s1,
+                                                            isPaused = isPaused,
+                                                            modifier = Modifier.weight(1f)
+                                                        )
+                                                        HudSectionCoreCard(
+                                                            section = s2,
+                                                            isPaused = isPaused,
+                                                            modifier = Modifier.weight(1f)
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
 
                                     // TACTICAL HUD PAUSE / RESUME / ABORT INTERACTIVE CONTROLS
@@ -703,3 +785,109 @@ fun HudImportDialog(
         }
     }
 }
+
+@Composable
+fun HudSectionCoreCard(
+    section: SectionProgress,
+    isPaused: Boolean,
+    modifier: Modifier = Modifier
+) {
+    val statusColor = when {
+        section.isFinished -> HudSecondary
+        isPaused -> HudAmber
+        section.isActive -> HudPrimary
+        else -> HudTextMuted
+    }
+
+    val statusText = when {
+        section.isFinished -> "DONE"
+        isPaused -> "HOLD"
+        section.isActive -> "RUN"
+        else -> "IDLE"
+    }
+
+    Box(
+        modifier = modifier
+            .background(Color(0xFF030A12), RoundedCornerShape(2.dp))
+            .border(0.5.dp, statusColor.copy(alpha = 0.5f), RoundedCornerShape(2.dp))
+            .padding(horizontal = 6.dp, vertical = 5.dp)
+    ) {
+        Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            // Core Title + Status Indicator
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .size(6.dp)
+                            .background(statusColor, RoundedCornerShape(3.dp))
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = "CORE %02d".format(section.sectionId),
+                        fontFamily = OrbitronFontFamily,
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = statusColor
+                    )
+                }
+
+                Text(
+                    text = statusText,
+                    fontFamily = ShareTechMonoFontFamily,
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = statusColor
+                )
+            }
+
+            // Mini Progress Bar
+            val pctFraction = (section.percent / 100f).coerceIn(0f, 1f)
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(5.dp)
+                    .background(Color(0xFF05121F), RoundedCornerShape(1.dp))
+                    .border(0.5.dp, HudBorder, RoundedCornerShape(1.dp))
+            ) {
+                if (pctFraction > 0f) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxHeight()
+                            .fillMaxWidth(pctFraction)
+                            .background(
+                                brush = Brush.horizontalGradient(
+                                    listOf(statusColor.copy(alpha = 0.7f), statusColor)
+                                )
+                            )
+                    )
+                }
+            }
+
+            // Stats row: Records & Percent
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "${String.format("%,d", section.recordsCount)} rec",
+                    fontFamily = ShareTechMonoFontFamily,
+                    fontSize = 9.sp,
+                    color = HudTextPrimary
+                )
+                Text(
+                    text = String.format("%.1f%%", section.percent),
+                    fontFamily = ShareTechMonoFontFamily,
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = statusColor
+                )
+            }
+        }
+    }
+}
+

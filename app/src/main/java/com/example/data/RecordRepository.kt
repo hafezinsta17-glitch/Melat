@@ -221,9 +221,10 @@ class RecordRepository(
         context: Context,
         uri: Uri,
         controller: ImportController = ImportController(),
-        startRecordOffset: Int = 0
+        startRecordOffset: Int = 0,
+        threadCount: Int = 8
     ): Flow<ImportProgress> {
-        return csvImporter.importFromUri(context, uri, controller, startRecordOffset)
+        return csvImporter.importFromUri(context, uri, controller, startRecordOffset, threadCount)
     }
 
     suspend fun importCsvString(
@@ -231,9 +232,10 @@ class RecordRepository(
         content: String,
         name: String = "TEXT_IMPORT.csv",
         controller: ImportController = ImportController(),
-        startRecordOffset: Int = 0
+        startRecordOffset: Int = 0,
+        threadCount: Int = 8
     ): Flow<ImportProgress> {
-        return csvImporter.importFromString(context, content, name, controller, startRecordOffset)
+        return csvImporter.importFromString(context, content, name, controller, startRecordOffset, threadCount)
     }
 
     suspend fun loadSampleRecords(): Int {

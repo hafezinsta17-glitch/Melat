@@ -318,9 +318,10 @@ class HudViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 _importProgress.value = ImportProgress(
                     isRunning = true,
-                    statusMessage = "OPENING SECURE DATA CHANNEL..."
+                    statusMessage = "SPAWNING 8-THREAD PARALLEL INGESTION ENGINE...",
+                    threadCount = 8
                 )
-                repository.importCsvUri(getApplication(), uri, controller).collect { progress ->
+                repository.importCsvUri(getApplication(), uri, controller, threadCount = 8).collect { progress ->
                     _importProgress.value = progress
                     if (progress.isFinished && progress.error == null) {
                         showFlash("IMPORT COMPLETE: ${String.format("%,d", progress.recordsImported)} RECORDS INDEXED")
@@ -339,7 +340,8 @@ class HudViewModel(application: Application) : AndroidViewModel(application) {
                     isRunning = false,
                     isFinished = true,
                     error = e.localizedMessage ?: "Failed to import CSV",
-                    statusMessage = "CRITICAL: IMPORT ABORTED"
+                    statusMessage = "CRITICAL: IMPORT ABORTED",
+                    threadCount = 8
                 )
                 showFlash("IMPORT FAILED: ${e.message}")
                 activeImportController = null
@@ -356,10 +358,11 @@ class HudViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 _importProgress.value = ImportProgress(
                     isRunning = true,
-                    statusMessage = "PARSING CSV STREAM...",
-                    fileName = sourceName
+                    statusMessage = "SPAWNING 8-THREAD PARALLEL INGESTION ENGINE...",
+                    fileName = sourceName,
+                    threadCount = 8
                 )
-                repository.importCsvString(getApplication(), content, sourceName, controller).collect { progress ->
+                repository.importCsvString(getApplication(), content, sourceName, controller, threadCount = 8).collect { progress ->
                     _importProgress.value = progress
                     if (progress.isFinished && progress.error == null) {
                         showFlash("IMPORT COMPLETE: ${String.format("%,d", progress.recordsImported)} RECORDS INDEXED")
